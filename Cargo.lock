@@ -55,6 +55,7 @@ name = "discord-webhook-storage"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "httparse",
  "rand",
  "serde",
  "serde_json",
