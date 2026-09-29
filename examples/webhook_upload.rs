@@ -7,7 +7,6 @@ use std::{error::Error, sync::Arc};
 use discord_webhook_storage::{WebhookCredentials, WriteConfig, WriteFile};
 use futures::AsyncWriteExt;
 use tokio_tcp_pool::{Pool, Route, rustls};
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 const FILE_SIZE: usize = 20_000_000;
 

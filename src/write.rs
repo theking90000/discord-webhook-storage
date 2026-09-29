@@ -155,7 +155,7 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
             .await?;
 
         connection
-            .write_all(&format_bytes!(
+            .write_all(format_bytes!(
                 "--{}\r\n\
                 Content-Disposition: form-data; name=\"files[0]\"; filename=\"{}\"\r\n\r\n",
                 &boundary,
@@ -223,7 +223,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
         let url = json
             .get("attachments")
             .and_then(|v| v.as_array())
-            .and_then(|v| v.get(0))
+            .and_then(|v| v.first())
             .and_then(|v| v.get("url"))
             .and_then(|v| v.as_str())
             .ok_or(HttpParseError)?;
@@ -269,7 +269,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         loop {
             match &mut this.state {
                 WriteFileState::Writing(_) => {
-                    let buf = format!("\r\n--{}--\r\n", &this.boundary).into_bytes();
+                    let buf = format!("\r\n--{}--\r\n", this.boundary).into_bytes();
                     this.state = WriteFileState::Closing(0, buf);
                 }
                 WriteFileState::Closing(n, buf) => {

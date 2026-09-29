@@ -96,7 +96,7 @@ impl<T: AsyncRead + Unpin> HttpStatusParser<T> {
     pub(crate) async fn status(&mut self) -> Result<u16> {
         let line = self.lines.next_line().await?;
 
-        let line = str::from_utf8(line)?;
+        let line = std::str::from_utf8(line)?;
 
         let rest = line.strip_prefix("HTTP/1.1 ").ok_or(HttpParseError)?;
 
