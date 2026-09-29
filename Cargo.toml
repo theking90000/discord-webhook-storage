@@ -29,6 +29,7 @@ tokio-tcp-pool = ["dep:tokio-tcp-pool"]
 
 [dependencies]
 futures = "0.3.34"
+rand = "0.10.3"
 tokio-tcp-pool = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
