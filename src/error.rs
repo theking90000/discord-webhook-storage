@@ -1,6 +1,7 @@
+use core::str;
 use std::fmt;
 
-use crate::Error::JsonError;
+use crate::Error::{HttpParseError, JsonError};
 
 /// A format, resource, or transformation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9,6 +10,7 @@ pub enum Error {
     InvalidWebhookUrl,
     IoError,
     JsonError,
+    HttpParseError,
 }
 
 impl fmt::Display for Error {
@@ -17,6 +19,7 @@ impl fmt::Display for Error {
             Self::IoError => "io error",
             Self::InvalidWebhookUrl => "invalid webhook url",
             Self::JsonError => "json error",
+            Self::HttpParseError => "http parse error",
         })
     }
 }
@@ -30,6 +33,24 @@ impl From<std::io::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(_: serde_json::Error) -> Self {
         JsonError
+    }
+}
+
+impl From<httparse::Error> for Error {
+    fn from(_: httparse::Error) -> Self {
+        HttpParseError
+    }
+}
+
+impl From<str::Utf8Error> for Error {
+    fn from(_: str::Utf8Error) -> Self {
+        HttpParseError
+    }
+}
+
+impl From<std::num::ParseIntError> for Error {
+    fn from(_: std::num::ParseIntError) -> Self {
+        HttpParseError
     }
 }
 

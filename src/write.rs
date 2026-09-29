@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{Error, Result, WebhookCredentials, write::WriteFileState::Writing};
+use crate::{Error::{self, HttpParseError}, Result, WebhookCredentials, http::HttpStatusParser};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,11 @@ use serde_json::{Value, json};
 // Discord limits to exactly 20MB the file payload
 // as of 29 september 2026 (might change in the future)
 const DISCORD_PAYLOAD_LIMIT: usize = 20_000_000;
+
+// Do not read the response if the body response size 
+// is more than 16kB. This is a safeguard to avoid memory over-usage
+// and OS crashes because of memory allocations
+const MAX_RESPONSE_BODYSIZE: usize = 16384;
 
 /// Represent a writable open file
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,7 +37,13 @@ enum WriteFileState {
     Closed,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WrittenFile {
+    id: String,
+    url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriteConfig {
     filename: String,
     payload_limit: usize,
@@ -150,7 +161,7 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
 
     fn remaining_write(&self, buf_len: usize) -> std::io::Result<usize> {
         match self.state {
-            Writing(n) => {
+            WriteFileState::Writing(n) => {
                 if buf_len <= n {
                     Ok(n)
                 } else {
@@ -162,13 +173,91 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
     }
 }
 
-impl<T: AsyncRead + Unpin> WriteFile<T> {
-    pub async fn finish(mut self) -> Result<()> {
-        // should return a FileIdentifier
-        // Read server response!
-        todo!();
+impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
+    /// Read the server HTTP response
+    /// And 
+    pub async fn finish(mut self) -> Result<WrittenFile> {
+        // ensure we are in a closed state.
+        self.close().await?;
 
-        Ok(())
+        let mut parser = HttpStatusParser::new();
+        // buf used to parse headers.
+        let mut buf = [0; 1024];
+
+        let status = loop {
+            if let Some(status) = parser.status()? {
+                break status;
+            }
+
+            let n = self.connection.read(&mut buf).await?;
+            if n == 0 {
+                return Err(HttpParseError);
+            }
+
+            parser.feed(&buf[..n]);
+        };
+
+        let mut parser = parser.into_headers();
+
+        loop {
+            while let Some((_name, _value)) = parser.next_header()? {
+                // process headers ; principally rate limit and stuff 
+            }
+
+            if parser.is_complete() {
+                break;
+            }
+
+            let n = self.connection.read(&mut buf).await?;
+            if n == 0 {
+                return Err(HttpParseError);
+            }
+
+            parser.feed(&buf[..n]);
+        }
+
+        if status != 200 {
+            // TODO: bette handle Error taxonomy
+            return Err(HttpParseError);
+        }
+
+        let body_size = parser
+            .body_size()
+            .ok_or(HttpParseError)?;
+
+        if body_size > MAX_RESPONSE_BODYSIZE {
+            return Err(HttpParseError);
+        }
+
+        let mut body = parser.remaining();
+
+        if body.len() > body_size {
+            return Err(HttpParseError);
+        }
+
+        let already_read = body.len();
+
+        body.resize(body_size, 0);
+
+        self.connection
+            .read_exact(&mut body[already_read..])
+            .await?;
+
+        // body contains exactly our JSON payload
+        let json = serde_json::from_slice::<Value>(&body)?;
+
+        let id = json.get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or(HttpParseError)?;
+
+        let url = json.get("attachments")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.get(0))
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                    .ok_or(HttpParseError)?;
+
+        Ok(WrittenFile { id: id.to_string(), url: url.to_string() })
     }
 }
 
@@ -188,7 +277,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         let result = Pin::new(&mut this.connection).poll_write(cx, buf);
 
         if let Poll::Ready(Ok(n)) = result {
-            this.state = Writing(remaining - n);
+            this.state = WriteFileState::Writing(remaining - n);
         }
 
         result
@@ -210,7 +299,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         let result = Pin::new(&mut this.connection).poll_write_vectored(cx, bufs);
 
         if let Poll::Ready(Ok(n)) = result {
-            this.state = Writing(remaining - n);
+            this.state = WriteFileState::Writing(remaining - n);
         }
 
         result
