@@ -33,9 +33,16 @@ httparse = "1.10.1"
 rand = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tokio-tcp-pool = { version = "0.1.1", optional = true }
+tokio-tcp-pool = { version = "0.1.2", optional = true }
 
 [dev-dependencies]
+tokio = { version = "1.53", features = ["rt", "macros"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+webpki-roots = "1.0"
+
+[[example]]
+name = "webhook_upload"
+required-features = ["tokio-tcp-pool"]
 
 [lints.rust]
 unsafe_code = "forbid"
