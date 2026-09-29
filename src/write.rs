@@ -9,7 +9,7 @@ use crate::{
     chunk_writer::ChunkWriter,
     http::HttpStatusParser,
 };
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -166,45 +166,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
         // ensure we are in a closed state.
         self.close().await?;
 
-        let mut parser = HttpStatusParser::new();
-        // buf used to parse headers.
-        let mut buf = [0; 1024];
-
-        let status = loop {
-            if let Some(status) = parser.status()? {
-                break status;
-            }
-            let n = self.connection.read(&mut buf).await?;
-            if n == 0 {
-                return Err(HttpParseError);
-            }
-
-            parser.feed(&buf[..n]);
-        };
-
+        let mut parser = HttpStatusParser::new(&mut self.connection);
+        let status = parser.status().await?;
         let mut parser = parser.into_headers();
-
-        loop {
-            while let Some((_name, _value)) = parser.next_header()? {
-                eprintln!("Header: {_name}: {_value}");
-                // process headers ; principally rate limit and stuff
-            }
-
-            if parser.is_complete() {
-                break;
-            }
-
-            let n = self.connection.read(&mut buf).await?;
-            if n == 0 {
-                return Err(HttpParseError);
-            }
-
-            parser.feed(&buf[..n]);
+        while let Some((_name, _value)) = parser.next_header().await? {
+            eprintln!("Header: {_name}: {_value}");
+            // process headers ; principally rate limit and stuff
         }
-
-        let body = parser
-            .body(&mut self.connection, MAX_RESPONSE_BODYSIZE)
-            .await?;
+        let body = parser.body(MAX_RESPONSE_BODYSIZE).await?;
 
         if status != 200 {
             // TODO: bette handle Error taxonomy

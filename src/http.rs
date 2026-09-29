@@ -4,15 +4,17 @@ use futures::{
     io::{BufReader, Cursor},
 };
 
-struct LineParser {
+struct LineParser<T> {
+    connection: T,
     buf: Vec<u8>,
     start: usize,
     search_pos: usize,
 }
 
-impl LineParser {
-    fn new() -> Self {
+impl<T: AsyncRead + Unpin> LineParser<T> {
+    fn new(connection: T) -> Self {
         Self {
+            connection,
             buf: Vec::new(),
             start: 0,
             search_pos: 0,
@@ -33,15 +35,19 @@ impl LineParser {
         self.buf.extend_from_slice(data);
     }
 
-    fn next_line(&mut self) -> Option<&[u8]> {
-        let relative = self.buf[self.search_pos..].iter().position(|&b| b == b'\n');
-
-        let pos = match relative {
-            Some(pos) => self.search_pos + pos,
-            None => {
-                self.search_pos = self.buf.len();
-                return None;
+    async fn next_line(&mut self) -> Result<&[u8]> {
+        let mut buf = [0; 1024];
+        let pos = loop {
+            if let Some(relative) = self.buf[self.search_pos..].iter().position(|&b| b == b'\n') {
+                break self.search_pos + relative;
             }
+            self.search_pos = self.buf.len();
+
+            let n = self.connection.read(&mut buf).await?;
+            if n == 0 {
+                return Err(HttpParseError);
+            }
+            self.feed(&buf[..n]);
         };
 
         let start = self.start;
@@ -49,10 +55,10 @@ impl LineParser {
         self.start = pos + 1;
         self.search_pos = self.start;
 
-        Some(&self.buf[start..pos])
+        Ok(&self.buf[start..pos])
     }
 
-    fn remaining(mut self) -> Vec<u8> {
+    fn remaining(mut self) -> (T, Vec<u8>) {
         if self.start > 0 {
             let remaining = self.buf.len() - self.start;
 
@@ -60,36 +66,30 @@ impl LineParser {
             self.buf.truncate(remaining);
         }
 
-        self.buf
+        (self.connection, self.buf)
     }
 }
 
-pub(crate) struct HttpStatusParser {
-    lines: LineParser,
+pub(crate) struct HttpStatusParser<T> {
+    lines: LineParser<T>,
 }
 
-pub(crate) struct HttpHeaderParser {
-    lines: LineParser,
+pub(crate) struct HttpHeaderParser<T> {
+    lines: LineParser<T>,
     content_length: Option<usize>,
     chunked: bool,
     done: bool,
 }
 
-impl HttpStatusParser {
-    pub(crate) fn new() -> Self {
+impl<T: AsyncRead + Unpin> HttpStatusParser<T> {
+    pub(crate) fn new(connection: T) -> Self {
         Self {
-            lines: LineParser::new(),
+            lines: LineParser::new(connection),
         }
     }
 
-    pub(crate) fn feed(&mut self, data: &[u8]) {
-        self.lines.feed(data);
-    }
-
-    pub(crate) fn status(&mut self) -> Result<Option<u16>> {
-        let Some(line) = self.lines.next_line() else {
-            return Ok(None);
-        };
+    pub(crate) async fn status(&mut self) -> Result<u16> {
+        let line = self.lines.next_line().await?;
 
         let line = str::from_utf8(line)?;
 
@@ -97,10 +97,10 @@ impl HttpStatusParser {
 
         let (status, _) = rest.split_once(' ').ok_or(HttpParseError)?;
 
-        Ok(Some(status.parse()?))
+        Ok(status.parse()?)
     }
 
-    pub(crate) fn into_headers(self) -> HttpHeaderParser {
+    pub(crate) fn into_headers(self) -> HttpHeaderParser<T> {
         HttpHeaderParser {
             lines: self.lines,
             content_length: None,
@@ -110,19 +110,13 @@ impl HttpStatusParser {
     }
 }
 
-impl HttpHeaderParser {
-    pub(crate) fn feed(&mut self, data: &[u8]) {
-        self.lines.feed(data);
-    }
-
-    pub(crate) fn next_header(&mut self) -> Result<Option<(&str, &str)>> {
+impl<T: AsyncRead + Unpin> HttpHeaderParser<T> {
+    pub(crate) async fn next_header(&mut self) -> Result<Option<(&str, &str)>> {
         if self.done {
             return Ok(None);
         }
 
-        let Some(line) = self.lines.next_line() else {
-            return Ok(None);
-        };
+        let line = self.lines.next_line().await?;
 
         let line = std::str::from_utf8(line)?;
         let line = line.strip_suffix('\r').unwrap_or(line);
@@ -177,27 +171,23 @@ impl HttpHeaderParser {
     }
 
     /// Read the response body using the framing specified by its headers.
-    pub(crate) async fn body<T: AsyncRead + Unpin>(
-        self,
-        mut connection: T,
-        max_size: usize,
-    ) -> Result<Vec<u8>> {
+    pub(crate) async fn body(self, max_size: usize) -> Result<Vec<u8>> {
         if self.is_chunked() {
-            read_chunked_body(&mut connection, self.remaining(), max_size).await
+            let (mut connection, buffered) = self.remaining();
+            read_chunked_body(&mut connection, buffered, max_size).await
         } else {
-            read_body(&mut connection, self, max_size).await
+            read_body(self, max_size).await
         }
     }
 
-    pub(crate) fn remaining(self) -> Vec<u8> {
+    pub(crate) fn remaining(self) -> (T, Vec<u8>) {
         self.lines.remaining()
     }
 }
 
 /// Read a response body with Content-Length, keeping bytes read with the headers.
 pub(crate) async fn read_body<T: AsyncRead + Unpin>(
-    connection: &mut T,
-    parser: HttpHeaderParser,
+    parser: HttpHeaderParser<T>,
     max_size: usize,
 ) -> Result<Vec<u8>> {
     let body_size = parser.body_size().ok_or(HttpParseError)?;
@@ -205,7 +195,7 @@ pub(crate) async fn read_body<T: AsyncRead + Unpin>(
         return Err(HttpParseError);
     }
 
-    let mut body = parser.remaining();
+    let (mut connection, mut body) = parser.remaining();
     if body.len() > body_size {
         return Err(HttpParseError);
     }
