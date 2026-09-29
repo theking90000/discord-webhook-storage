@@ -1,0 +1,40 @@
+[package]
+name = "discord-webhook-storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["theking90000 <martin.cogh@gmail.com>"]
+description = "Store and retrieve files on discord webhooks"
+license = "MIT"
+repository = "https://github.com/theking90000/discord-webhook-storage"
+documentation = "https://docs.rs/discord-webhook-storage"
+readme = "README.md"
+keywords = ["webhook", "discord"]
+categories = []
+include = [
+    "/src",
+    "/tests",
+    "/benches",
+    "/examples",
+    "/docs",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/Cargo.toml",
+]
+
+[features]
+default = []
+tokio-tcp-pool = ["dep:tokio-tcp-pool"]
+
+[dependencies]
+tokio-tcp-pool = { version = "0.1.1", optional = true }
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
