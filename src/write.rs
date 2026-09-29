@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{Error::HttpParseError, Result, WebhookCredentials, http::HttpStatusParser};
+use crate::{Error::HttpParseError, Result, WebhookCredentials, http::HttpStatusParser, chunk_writer::ChunkWriter};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,8 @@ const DISCORD_PAYLOAD_LIMIT: usize = 20_000_000;
 const MAX_RESPONSE_BODYSIZE: usize = 16384;
 
 /// Represent a writable open file
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriteFile<T> {
-    connection: T,
+    connection: ChunkWriter<T>,
     boundary: String,
 
     state: WriteFileState,
@@ -73,22 +72,8 @@ impl Default for WriteConfig {
 
 macro_rules! format_bytes {
     ($($arg:tt)*) => {
-        format!($($arg)*).into_bytes()
+        format!($($arg)*).as_bytes()
     };
-}
-
-macro_rules! write_vectored {
-    ($writer:expr, [$($buf:expr),* $(,)?]) => {{
-        let buffers = [
-            $($buf),*
-        ];
-
-        let bufs = buffers
-            .each_ref()
-            .map(|buf| std::io::IoSlice::new(buf));
-
-        $writer.write_vectored(&bufs).await
-    }};
 }
 
 fn generate_boundary() -> String {
@@ -112,44 +97,28 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
         config: &WriteConfig,
     ) -> Result<Self> {
         let boundary = generate_boundary();
+        // Send HTTP Headers
+        connection.write_all(
+            format_bytes!("POST /api/webhooks/{}/{}?wait=true HTTP/1.1\r\n\
+            Host: discord.com\r\n\
+            Transfer-Encoding: chunked\r\n\
+            Content-Type: multipart/form-data; boundary={}\r\n\
+            \r\n", 
+            credentials.id, credentials.token, &boundary)
+        ).await?;
 
-        write_vectored!(
-            connection,
-            [
-                format_bytes!(
-                    "POST /api/webhooks/{}/{}%3Fwait=true HTTP/1.1\r\n",
-                    credentials.id,
-                    credentials.token
-                ),
-                format_bytes!("Host: discord.com\r\n"),
-                format_bytes!(
-                    "Content-Type: multipart/form-data; boundary={}\r\n",
-                    &boundary
-                ),
-                format_bytes!("\r\n"),
-            ]
-        )?;
+        // At this point we use chunked transfert encoding
+        let mut connection = ChunkWriter::new(connection);
+       
+        connection.write_all(format_bytes!("--{}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\
+        Content-Type: application/json\r\n\r\n\
+        {}\r\n", &boundary, &serde_json::to_string(&config.as_request())?)).await?;
+           
 
-        write_vectored!(
-            connection,
-            [
-                format_bytes!("--{}\r\n", boundary),
-                format_bytes!("Content-Disposition: form-data; name=\"payload_json\"\r\n"),
-                format_bytes!("Content-Type: application/json\r\n\r\n"),
-                serde_json::to_vec(&config.as_request())?,
-                format_bytes!("\r\n"),
-            ]
-        )?;
-
-        write_vectored!(
-            connection,
-            [
-                format_bytes!("--{}\r\n", &boundary),
-                format_bytes!(
-                    "Content-Disposition: form-data; name=\"files[0]\"; filename=\"data.bin\"\r\n\r\n"
-                )
-            ]
-        )?;
+        connection.write_all(
+                &format_bytes!("--{}\r\n\
+                Content-Disposition: form-data; name=\"files[0]\"; filename=\"{}\"\r\n\r\n", &boundary, &config.filename)
+        ).await?;
 
         Ok(Self {
             connection,
@@ -177,8 +146,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
     /// Read the server HTTP response
     /// And
     pub async fn finish(mut self) -> Result<WrittenFile> {
+        println!("OK?>");
         // ensure we are in a closed state.
         self.close().await?;
+        println!("closed");
 
         let mut parser = HttpStatusParser::new();
         // buf used to parse headers.
@@ -186,10 +157,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
 
         let status = loop {
             if let Some(status) = parser.status()? {
+                println!("status {}",status);
                 break status;
             }
-
+            println!("read");
             let n = self.connection.read(&mut buf).await?;
+            println!("read{}",n);
             if n == 0 {
                 return Err(HttpParseError);
             }
@@ -201,6 +174,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
 
         loop {
             while let Some((_name, _value)) = parser.next_header()? {
+                // eprintln!("Header: {_name}: {_value}")
                 // process headers ; principally rate limit and stuff
             }
 
@@ -216,18 +190,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
             parser.feed(&buf[..n]);
         }
 
-        if status != 200 {
-            // TODO: bette handle Error taxonomy
-            return Err(HttpParseError);
-        }
-
         let body_size = parser.body_size().ok_or(HttpParseError)?;
 
         if body_size > MAX_RESPONSE_BODYSIZE {
             return Err(HttpParseError);
         }
 
-        let mut body = parser.remaining();
+        let mut body: Vec<u8> = parser.remaining();
 
         if body.len() > body_size {
             return Err(HttpParseError);
@@ -240,6 +209,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
         self.connection
             .read_exact(&mut body[already_read..])
             .await?;
+
+        if status != 200 {
+            // TODO: bette handle Error taxonomy
+            return Err(HttpParseError);
+        }
 
         // body contains exactly our JSON payload
         let json = serde_json::from_slice::<Value>(&body)?;
@@ -281,32 +255,32 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
 
         if let Poll::Ready(Ok(n)) = result {
             this.state = WriteFileState::Writing(remaining - n);
-        }
+        }        
 
         result
     }
 
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-        let total_len: usize = bufs.iter().map(|buf| buf.len()).sum();
+    // fn poll_write_vectored(
+    //     self: Pin<&mut Self>,
+    //     cx: &mut Context<'_>,
+    //     bufs: &[std::io::IoSlice<'_>],
+    // ) -> Poll<std::io::Result<usize>> {
+    //     let this = self.get_mut();
+    //     let total_len: usize = bufs.iter().map(|buf| buf.len()).sum();
 
-        let remaining = match this.remaining_write(total_len) {
-            Ok(n) => n,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
+    //     let remaining = match this.remaining_write(total_len) {
+    //         Ok(n) => n,
+    //         Err(e) => return Poll::Ready(Err(e)),
+    //     };
 
-        let result = Pin::new(&mut this.connection).poll_write_vectored(cx, bufs);
+    //     let result = Pin::new(&mut this.connection).poll_write_vectored(cx, bufs);
 
-        if let Poll::Ready(Ok(n)) = result {
-            this.state = WriteFileState::Writing(remaining - n);
-        }
+    //     if let Poll::Ready(Ok(n)) = result {
+    //         this.state = WriteFileState::Writing(remaining - n);
+    //     }
 
-        result
-    }
+    //     result
+    // }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
@@ -320,7 +294,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         loop {
             match &mut this.state {
                 WriteFileState::Writing(_) => {
-                    let buf = format_bytes!("\r\n--{}--\r\n", &this.boundary);
+                    let buf = format!("\r\n--{}--\r\n", &this.boundary).into_bytes();
                     this.state = WriteFileState::Closing(0, buf);
                 }
                 WriteFileState::Closing(n, buf) => {
