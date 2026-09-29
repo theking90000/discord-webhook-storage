@@ -1,7 +1,7 @@
 use std::{
-    io::{self, IoSlice, Write as _},
+    io::{self, Cursor, IoSlice, Write as _},
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use futures::{AsyncRead, AsyncWrite};
@@ -14,6 +14,9 @@ pub const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Final marker of an HTTP/1.1 chunked transfer.
 const FINAL_CHUNK: &[u8] = b"0\r\n\r\n";
+
+/// Bound the stack space used for vectored payloads.
+const MAX_PAYLOAD_BUFS: usize = 16;
 
 /// An [`AsyncWrite`] adapter implementing HTTP/1.1
 /// `Transfer-Encoding: chunked`.
@@ -45,7 +48,7 @@ const FINAL_CHUNK: &[u8] = b"0\r\n\r\n";
 pub struct ChunkWriter<T> {
     inner: T,
 
-    /// Fully encoded HTTP chunk waiting to be written.
+    /// Unwritten remainder of an HTTP chunk.
     pending: Vec<u8>,
 
     /// Number of bytes from `pending` already written to `inner`.
@@ -88,8 +91,7 @@ impl<T> ChunkWriter<T> {
         Self {
             inner,
 
-            // A small initial allocation. The Vec will grow when needed
-            // and then reuse its capacity for subsequent chunks.
+            // Allocate only after a partial write, then reuse the capacity.
             pending: Vec::new(),
             pending_pos: 0,
 
@@ -122,74 +124,6 @@ impl<T> ChunkWriter<T> {
     /// and the underlying stream flushed.
     pub fn is_closed(&self) -> bool {
         self.state == State::Closed
-    }
-
-    /// Prepare one encoded HTTP chunk in `pending`.
-    fn prepare_chunk(&mut self, data: &[u8]) -> io::Result<()> {
-        debug_assert!(!data.is_empty());
-        debug_assert!(data.len() <= self.max_chunk_size);
-        debug_assert!(self.pending.is_empty());
-
-        self.pending_pos = 0;
-
-        // Vec<u8> implements std::io::Write, so this avoids allocating
-        // an intermediate String with format!("{:X}\r\n", ...).
-        write!(&mut self.pending, "{:X}\r\n", data.len())?;
-
-        self.pending.extend_from_slice(data);
-        self.pending.extend_from_slice(b"\r\n");
-
-        Ok(())
-    }
-
-    /// Same as `prepare_chunk`, but consumes bytes from several IoSlices.
-    ///
-    /// Returns the number of payload bytes accepted.
-    fn prepare_vectored_chunk(
-        &mut self,
-        bufs: &[IoSlice<'_>],
-    ) -> io::Result<usize> {
-        debug_assert!(self.pending.is_empty());
-
-        // Determine how many input bytes we want to accept without ever
-        // overflowing usize.
-        let mut payload_len = 0;
-
-        for buf in bufs {
-            let available = self.max_chunk_size - payload_len;
-
-            if available == 0 {
-                break;
-            }
-
-            payload_len += buf.len().min(available);
-        }
-
-        if payload_len == 0 {
-            return Ok(0);
-        }
-
-        self.pending_pos = 0;
-
-        write!(&mut self.pending, "{:X}\r\n", payload_len)?;
-
-        let mut remaining = payload_len;
-
-        for buf in bufs {
-            if remaining == 0 {
-                break;
-            }
-
-            let n = buf.len().min(remaining);
-
-            self.pending.extend_from_slice(&buf[..n]);
-
-            remaining -= n;
-        }
-
-        self.pending.extend_from_slice(b"\r\n");
-
-        Ok(payload_len)
     }
 }
 
@@ -236,48 +170,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-
-        if this.state != State::Writing {
-            return Poll::Ready(Err(io::Error::other(
-                "chunked stream is no longer writable",
-            )));
-        }
-
-        /*
-         * Before accepting more bytes from the caller, the previous
-         * encoded chunk must have been completely written.
-         */
-        match this.poll_drain_pending(cx) {
-            Poll::Pending => {
-                return Poll::Pending;
-            }
-
-            Poll::Ready(Err(e)) => {
-                return Poll::Ready(Err(e));
-            }
-
-            Poll::Ready(Ok(())) => {}
-        }
-
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-
-        let n = buf.len().min(this.max_chunk_size);
-
-        /*
-         * Copy the caller's bytes into our own buffer.
-         *
-         * Once copied, returning Ok(n) is valid even if the corresponding
-         * encoded chunk has not yet reached the underlying transport:
-         * ChunkWriter now owns those n bytes.
-         */
-        if let Err(e) = this.prepare_chunk(&buf[..n]) {
-            return Poll::Ready(Err(e));
-        }
-
-        Poll::Ready(Ok(n))
+        self.poll_write_vectored(cx, &[IoSlice::new(buf)])
     }
 
     fn poll_write_vectored(
@@ -293,22 +186,59 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
             )));
         }
 
-        match this.poll_drain_pending(cx) {
-            Poll::Pending => {
-                return Poll::Pending;
-            }
+        // Finish the previous chunk before accepting another payload.
+        ready!(this.poll_drain_pending(cx))?;
 
-            Poll::Ready(Err(e)) => {
-                return Poll::Ready(Err(e));
-            }
+        let mut chunk = [IoSlice::new(&[]); MAX_PAYLOAD_BUFS + 2];
+        let mut count = 1;
+        let mut payload_len = 0;
 
-            Poll::Ready(Ok(())) => {}
+        for buf in bufs {
+            if payload_len == this.max_chunk_size || count == MAX_PAYLOAD_BUFS + 1 {
+                break;
+            }
+            let n = buf.len().min(this.max_chunk_size - payload_len);
+            if n > 0 {
+                chunk[count] = IoSlice::new(&buf[..n]);
+                count += 1;
+                payload_len += n;
+            }
         }
 
-        match this.prepare_vectored_chunk(bufs) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(e) => Poll::Ready(Err(e)),
+        if payload_len == 0 {
+            return Poll::Ready(Ok(0));
         }
+
+        let mut header = [0; 2 * size_of::<usize>() + 2];
+        let header_len = {
+            let mut cursor = Cursor::new(&mut header[..]);
+            write!(&mut cursor, "{:X}\r\n", payload_len)?;
+            cursor.position() as usize
+        };
+        let chunk_len = payload_len.checked_add(header_len + 2).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "chunk size overflows usize")
+        })?;
+        chunk[0] = IoSlice::new(&header[..header_len]);
+        chunk[count] = IoSlice::new(b"\r\n");
+
+        let written = ready!(Pin::new(&mut this.inner)
+            .poll_write_vectored(cx, &chunk[..count + 1]))?;
+        if written == 0 {
+            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+        }
+
+        // Once the header starts, retain the rest of the announced chunk so
+        // the caller can reuse its buffers or close the writer immediately.
+        if written < chunk_len {
+            let mut remaining = &mut chunk[..count + 1];
+            IoSlice::advance_slices(&mut remaining, written);
+            this.pending.reserve(chunk_len - written);
+            for buf in remaining {
+                this.pending.extend_from_slice(buf);
+            }
+        }
+
+        Poll::Ready(Ok(payload_len))
     }
 
     fn poll_flush(
@@ -368,7 +298,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
                  *
                  * directly to the underlying transport.
                  *
-                 * It must NOT go through prepare_chunk(), otherwise we'd
+                 * It must NOT go through poll_write(), otherwise we'd
                  * chunk-encode the chunk terminator itself.
                  */
                 State::Finalizing => {
