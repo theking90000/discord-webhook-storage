@@ -1,9 +1,12 @@
+//! Incremental HTTP/1.1 response parsing with bounded decoded body sizes.
+
 use crate::{Error::HttpParseError, Result};
 use futures::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt,
     io::{BufReader, Cursor},
 };
 
+/// Retain unread bytes across lines, including any response body read ahead.
 struct LineParser<T> {
     connection: T,
     buf: Vec<u8>,
@@ -70,10 +73,12 @@ impl<T: AsyncRead + Unpin> LineParser<T> {
     }
 }
 
+/// Parse the status line before transferring buffered input to the header parser.
 pub(crate) struct HttpStatusParser<T> {
     lines: LineParser<T>,
 }
 
+/// Track response framing while reading headers up to their terminating empty line.
 pub(crate) struct HttpHeaderParser<T> {
     lines: LineParser<T>,
     content_length: Option<usize>,

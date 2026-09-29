@@ -3,13 +3,19 @@ use std::fmt;
 
 use crate::Error::{HttpParseError, JsonError};
 
-/// A format, resource, or transformation failure.
+/// A failure while parsing credentials, sending an upload, or reading its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Error {
+    /// The webhook URL does not have the expected prefix or credential separator.
     InvalidWebhookUrl,
+    /// The transport failed to read, write, flush, or finish the request body.
     IoError,
+    /// Request serialization or response JSON decoding failed.
     JsonError,
+    /// The HTTP response is malformed, oversized, or has an unsuccessful status.
+    ///
+    /// This also covers missing message identifiers and attachment URLs.
     HttpParseError,
 }
 
@@ -56,4 +62,5 @@ impl From<std::num::ParseIntError> for Error {
 
 impl std::error::Error for Error {}
 
+/// A result returned by webhook credential parsing and upload operations.
 pub type Result<T> = std::result::Result<T, Error>;

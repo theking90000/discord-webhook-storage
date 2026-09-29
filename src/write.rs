@@ -4,9 +4,7 @@ use std::{
 };
 
 use crate::{
-    Error::HttpParseError,
-    Result, WebhookCredentials,
-    chunk_writer::ChunkWriter,
+    Error::HttpParseError, Result, WebhookCredentials, chunk_writer::ChunkWriter,
     http::HttpStatusParser,
 };
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -14,16 +12,22 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-// Discord limits to exactly 20MB the file payload
-// as of 29 september 2026 (might change in the future)
+// Default upload limit enforced by this crate, excluding multipart framing.
 const DISCORD_PAYLOAD_LIMIT: usize = 20_000_000;
 
-// Do not read the response if the body response size
-// is more than 16kB. This is a safeguard to avoid memory over-usage
-// and OS crashes because of memory allocations
+// Bound the decoded JSON response before allocating its body.
 const MAX_RESPONSE_BODYSIZE: usize = 16384;
 
-/// Represent a writable open file
+/// An open file upload implementing [`AsyncWrite`].
+///
+/// Each write sends file bytes in an HTTP chunk. Writes that exceed the remaining
+/// payload allowance fail before sending any bytes from that call.
+/// [`AsyncWriteExt::flush`] drains buffered bytes without finishing the upload.
+/// [`AsyncWriteExt::close`] finishes the request body and keeps the transport open
+/// so that [`Self::finish`] can read the response.
+///
+/// Call [`Self::finish`] to obtain the message identifier and attachment URL.
+/// Dropping the writer does not complete the upload.
 pub struct WriteFile<T> {
     connection: ChunkWriter<T>,
     boundary: String,
@@ -33,23 +37,37 @@ pub struct WriteFile<T> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WriteFileState {
-    /// number of bytes allowed remaining
+    /// Remaining file payload allowance.
     Writing(usize),
-    /// closing boundary
+    /// Write offset and bytes of the multipart closing boundary.
     Closing(usize, Vec<u8>),
+    /// Finish chunk framing and flush the transport.
     Finalizing,
+    /// The request body is complete; the response has not yet been read.
     Closed,
 }
 
+/// The message identifier and first attachment URL returned by an upload.
+///
+/// Serialize this value with Serde to persist its `id` and `url` fields.
+/// The fields are private; this crate currently provides no download operation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WrittenFile {
+    /// Identifier of the webhook message containing the attachment.
     id: String,
+    /// Attachment URL from the webhook response.
     url: String,
 }
 
+/// Upload settings used by [`WriteFile::open`].
+///
+/// [`Default`] uses the filename `file.bin` and a payload limit of 20,000,000 bytes.
+/// The fields are private and currently have no public setters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriteConfig {
+    /// Filename sent in the JSON metadata and multipart headers.
     filename: String,
+    /// Maximum number of file bytes accepted by the writer.
     payload_limit: usize,
 }
 
@@ -58,7 +76,6 @@ impl WriteConfig {
         json!({
             "attachments": [{
                 "id": 0,
-                //"description": "File",
                 "filename": &self.filename,
                 "payload_limit": &self.payload_limit,
             }]
@@ -92,17 +109,26 @@ fn generate_boundary() -> String {
 }
 
 impl<T: AsyncWrite + Unpin> WriteFile<T> {
-    /// Open a new writable file to a Discord webhook.
-    /// * `connection` - Holds an open TCP/TLS connection to discord.com:443
-    /// * `credentials` - the webhook credentials used for this request
-    /// * `config` - the custom webhook configuration
+    /// Start an upload using an established TLS connection to `discord.com:443`.
+    ///
+    /// Sends the HTTP request headers, JSON metadata, and multipart file headers.
+    /// The caller supplies a transport implementing the `futures` I/O traits.
+    /// This method does not establish a connection or perform a TLS handshake.
+    ///
+    /// `credentials` selects the webhook, and `config` sets the file metadata and
+    /// payload allowance. The writer owns the connection after this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::IoError`] for transport failures or
+    /// [`crate::Error::JsonError`] if serializing the request metadata fails.
     pub async fn open(
         mut connection: T,
         credentials: &WebhookCredentials<'_>,
         config: &WriteConfig,
     ) -> Result<Self> {
         let boundary = generate_boundary();
-        // Send HTTP Headers
+        // Send headers before enabling chunk framing for the request body.
         connection
             .write_all(format_bytes!(
                 "POST /api/webhooks/{}/{}?wait=true HTTP/1.1\r\n\
@@ -116,7 +142,6 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
             ))
             .await?;
 
-        // At this point we use chunked transfert encoding
         let mut connection = ChunkWriter::new(connection);
 
         connection
@@ -141,7 +166,6 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
         Ok(Self {
             connection,
             boundary,
-            // from config OR default?
             state: WriteFileState::Writing(config.payload_limit),
         })
     }
@@ -161,26 +185,34 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
-    /// Finish the request body and read the server HTTP response.
+    /// Complete the upload and read its message identifier and attachment URL.
+    ///
+    /// Closes the request body if needed, then reads an HTTP/1.1 response with
+    /// `Content-Length` or chunked transfer encoding. The decoded response body
+    /// must fit within 16 KiB. This consumes the writer and its connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::IoError`] for transport failures and
+    /// [`crate::Error::JsonError`] for invalid response JSON.
+    /// [`crate::Error::HttpParseError`] covers malformed HTTP, unsupported framing,
+    /// oversized bodies, statuses other than 200, and missing response fields.
     pub async fn finish(mut self) -> Result<WrittenFile> {
-        // ensure we are in a closed state.
+        // Send the multipart boundary and final chunk before reading the response.
         self.close().await?;
 
         let mut parser = HttpStatusParser::new(&mut self.connection);
         let status = parser.status().await?;
         let mut parser = parser.into_headers();
-        while let Some((_name, _value)) = parser.next_header().await? {
-            eprintln!("Header: {_name}: {_value}");
-            // process headers ; principally rate limit and stuff
+        while !parser.is_complete() {
+            parser.next_header().await?;
         }
         let body = parser.body(MAX_RESPONSE_BODYSIZE).await?;
 
         if status != 200 {
-            // TODO: bette handle Error taxonomy
             return Err(HttpParseError);
         }
 
-        // body contains exactly our JSON payload
         let json = serde_json::from_slice::<Value>(&body)?;
 
         let id = json
@@ -225,28 +257,6 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         result
     }
 
-    // fn poll_write_vectored(
-    //     self: Pin<&mut Self>,
-    //     cx: &mut Context<'_>,
-    //     bufs: &[std::io::IoSlice<'_>],
-    // ) -> Poll<std::io::Result<usize>> {
-    //     let this = self.get_mut();
-    //     let total_len: usize = bufs.iter().map(|buf| buf.len()).sum();
-
-    //     let remaining = match this.remaining_write(total_len) {
-    //         Ok(n) => n,
-    //         Err(e) => return Poll::Ready(Err(e)),
-    //     };
-
-    //     let result = Pin::new(&mut this.connection).poll_write_vectored(cx, bufs);
-
-    //     if let Poll::Ready(Ok(n)) = result {
-    //         this.state = WriteFileState::Writing(remaining - n);
-    //     }
-
-    //     result
-    // }
-
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
 
@@ -273,7 +283,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
                             if (nr + (*n)) == buf.len() {
                                 this.state = WriteFileState::Finalizing;
                             } else {
-                                // advance Vec pointer by nr
+                                // Preserve the offset across partial writes and Pending.
                                 *n += nr;
                             }
                         }

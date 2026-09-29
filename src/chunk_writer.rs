@@ -83,10 +83,7 @@ impl<T> ChunkWriter<T> {
     ///
     /// Panics if `max_chunk_size == 0`.
     pub fn with_max_chunk_size(inner: T, max_chunk_size: usize) -> Self {
-        assert!(
-            max_chunk_size > 0,
-            "chunk size must be greater than zero"
-        );
+        assert!(max_chunk_size > 0, "chunk size must be greater than zero");
 
         Self {
             inner,
@@ -101,42 +98,13 @@ impl<T> ChunkWriter<T> {
             final_pos: 0,
         }
     }
-
-    /// Return a reference to the underlying transport.
-    pub fn get_ref(&self) -> &T {
-        &self.inner
-    }
-
-    /// Return a mutable reference to the underlying transport.
-    pub fn get_mut(&mut self) -> &mut T {
-        &mut self.inner
-    }
-
-    /// Consume the chunk writer and return the underlying transport.
-    ///
-    /// This does not automatically finish the chunked transfer.
-    /// The caller should normally call `close().await` first.
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-
-    /// Returns whether the terminating zero-length chunk has been sent
-    /// and the underlying stream flushed.
-    pub fn is_closed(&self) -> bool {
-        self.state == State::Closed
-    }
 }
 
 impl<T: AsyncWrite + Unpin> ChunkWriter<T> {
     /// Try to completely write the currently buffered encoded chunk.
-    fn poll_drain_pending(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_drain_pending(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.pending_pos < self.pending.len() {
-            match Pin::new(&mut self.inner)
-                .poll_write(cx, &self.pending[self.pending_pos..])
-            {
+            match Pin::new(&mut self.inner).poll_write(cx, &self.pending[self.pending_pos..]) {
                 Poll::Pending => {
                     return Poll::Pending;
                 }
@@ -146,9 +114,7 @@ impl<T: AsyncWrite + Unpin> ChunkWriter<T> {
                 }
 
                 Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(io::Error::from(
-                        io::ErrorKind::WriteZero,
-                    )));
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                 }
 
                 Poll::Ready(Ok(n)) => {
@@ -221,8 +187,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
         chunk[0] = IoSlice::new(&header[..header_len]);
         chunk[count] = IoSlice::new(b"\r\n");
 
-        let written = ready!(Pin::new(&mut this.inner)
-            .poll_write_vectored(cx, &chunk[..count + 1]))?;
+        let written =
+            ready!(Pin::new(&mut this.inner).poll_write_vectored(cx, &chunk[..count + 1]))?;
         if written == 0 {
             return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
         }
@@ -241,10 +207,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
         Poll::Ready(Ok(payload_len))
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
         // First make sure the last accepted payload was actually sent.
@@ -263,10 +226,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
         loop {
@@ -275,21 +235,19 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
                  * Finish any normal data chunk before sending the
                  * terminating zero-length chunk.
                  */
-                State::Writing => {
-                    match this.poll_drain_pending(cx) {
-                        Poll::Pending => {
-                            return Poll::Pending;
-                        }
-
-                        Poll::Ready(Err(e)) => {
-                            return Poll::Ready(Err(e));
-                        }
-
-                        Poll::Ready(Ok(())) => {
-                            this.state = State::Finalizing;
-                        }
+                State::Writing => match this.poll_drain_pending(cx) {
+                    Poll::Pending => {
+                        return Poll::Pending;
                     }
-                }
+
+                    Poll::Ready(Err(e)) => {
+                        return Poll::Ready(Err(e));
+                    }
+
+                    Poll::Ready(Ok(())) => {
+                        this.state = State::Finalizing;
+                    }
+                },
 
                 /*
                  * Send:
@@ -315,9 +273,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
                             }
 
                             Poll::Ready(Ok(0)) => {
-                                return Poll::Ready(Err(io::Error::from(
-                                    io::ErrorKind::WriteZero,
-                                )));
+                                return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                             }
 
                             Poll::Ready(Ok(n)) => {
@@ -335,23 +291,21 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
                  * The HTTP request is finished, but the TCP/TLS stream
                  * must remain alive so that its response can be read.
                  */
-                State::Flushing => {
-                    match Pin::new(&mut this.inner).poll_flush(cx) {
-                        Poll::Pending => {
-                            return Poll::Pending;
-                        }
-
-                        Poll::Ready(Err(e)) => {
-                            return Poll::Ready(Err(e));
-                        }
-
-                        Poll::Ready(Ok(())) => {
-                            this.state = State::Closed;
-
-                            return Poll::Ready(Ok(()));
-                        }
+                State::Flushing => match Pin::new(&mut this.inner).poll_flush(cx) {
+                    Poll::Pending => {
+                        return Poll::Pending;
                     }
-                }
+
+                    Poll::Ready(Err(e)) => {
+                        return Poll::Ready(Err(e));
+                    }
+
+                    Poll::Ready(Ok(())) => {
+                        this.state = State::Closed;
+
+                        return Poll::Ready(Ok(()));
+                    }
+                },
 
                 State::Closed => {
                     return Poll::Ready(Ok(()));

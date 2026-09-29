@@ -1,5 +1,9 @@
 use crate::{Error, Result};
 
+/// A webhook identifier and token borrowed from a Discord webhook URL.
+///
+/// Parsing keeps references to the URL without allocating. Keep the source
+/// string alive for as long as the credentials are needed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookCredentials<'a> {
     pub(crate) id: &'a str,
@@ -7,8 +11,12 @@ pub struct WebhookCredentials<'a> {
 }
 
 impl<'a> WebhookCredentials<'a> {
-    /// Parse a WebhookCredentials from a Discord URL
-    /// URL must be formatted as `https://discord.com/api/webhooks/<id>/<token>`
+    /// Extract credentials from `https://discord.com/api/webhooks/<id>/<token>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidWebhookUrl`] when the URL lacks the expected
+    /// prefix or the separator between the identifier and token.
     pub fn parse(url: &'a str) -> Result<WebhookCredentials<'a>> {
         if !url.starts_with("https://discord.com/api/webhooks/") {
             return Err(Error::InvalidWebhookUrl);

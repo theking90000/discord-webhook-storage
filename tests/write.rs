@@ -1,3 +1,5 @@
+//! Check upload framing, finalization, payload limits, and response handling.
+
 use std::{
     cell::RefCell,
     io::{self, IoSlice},

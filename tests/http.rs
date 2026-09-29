@@ -1,12 +1,18 @@
+//! Check incremental HTTP response parsing and preservation of buffered body bytes.
+
 // The parser is private to the crate. Include it here to test its incremental
 // behavior without changing the public API.
 pub use discord_webhook_storage::{Error, Result};
 #[path = "../src/http.rs"]
 mod http;
 
-use http::HttpStatusParser;
 use futures::{AsyncRead, executor::block_on, io::Cursor};
-use std::{io, pin::Pin, task::{Context, Poll}};
+use http::HttpStatusParser;
+use std::{
+    io,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 struct Fragmented<'a>(&'a [u8]);
 
@@ -44,12 +50,23 @@ fn status_rejects_bad_version_code_and_utf8() {
 
 #[test]
 fn headers_are_case_insensitive_and_keep_body_bytes() {
-    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nX-Test:  a  \r\nCONTENT-LENGTH: 4\r\n\r\nbody"));
+    let mut status = HttpStatusParser::new(Cursor::new(
+        b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nX-Test:  a  \r\nCONTENT-LENGTH: 4\r\n\r\nbody",
+    ));
     assert_eq!(block_on(status.status()).unwrap(), 200);
     let mut headers = status.into_headers();
-    assert_eq!(block_on(headers.next_header()).unwrap(), Some(("content-length", "4")));
-    assert_eq!(block_on(headers.next_header()).unwrap(), Some(("X-Test", "a")));
-    assert_eq!(block_on(headers.next_header()).unwrap(), Some(("CONTENT-LENGTH", "4")));
+    assert_eq!(
+        block_on(headers.next_header()).unwrap(),
+        Some(("content-length", "4"))
+    );
+    assert_eq!(
+        block_on(headers.next_header()).unwrap(),
+        Some(("X-Test", "a"))
+    );
+    assert_eq!(
+        block_on(headers.next_header()).unwrap(),
+        Some(("CONTENT-LENGTH", "4"))
+    );
     assert_eq!(block_on(headers.next_header()).unwrap(), None);
     assert!(headers.is_complete());
     assert_eq!(headers.body_size(), Some(4));
@@ -59,11 +76,16 @@ fn headers_are_case_insensitive_and_keep_body_bytes() {
 
 #[test]
 fn headers_can_arrive_in_fragments() {
-    let mut status = HttpStatusParser::new(Fragmented(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc"));
+    let mut status = HttpStatusParser::new(Fragmented(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc",
+    ));
     block_on(status.status()).unwrap();
     let mut headers = status.into_headers();
     assert!(!headers.is_complete());
-    assert_eq!(block_on(headers.next_header()).unwrap(), Some(("Content-Length", "3")));
+    assert_eq!(
+        block_on(headers.next_header()).unwrap(),
+        Some(("Content-Length", "3"))
+    );
     assert!(!headers.is_complete());
     assert_eq!(block_on(headers.next_header()).unwrap(), None);
     assert!(headers.is_complete());
@@ -108,7 +130,10 @@ fn missing_content_length_is_visible() {
     let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\nX-Test: yes\r\n\r\n"));
     block_on(status.status()).unwrap();
     let mut headers = status.into_headers();
-    assert_eq!(block_on(headers.next_header()).unwrap(), Some(("X-Test", "yes")));
+    assert_eq!(
+        block_on(headers.next_header()).unwrap(),
+        Some(("X-Test", "yes"))
+    );
     assert_eq!(block_on(headers.next_header()).unwrap(), None);
     assert!(headers.is_complete());
     assert_eq!(headers.body_size(), None);
@@ -116,13 +141,22 @@ fn missing_content_length_is_visible() {
 
 #[test]
 fn many_headers_compact_consumed_input() {
-    let bytes = format!("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n{}\r\nbody", "X-Header: value\r\n".repeat(500));
+    let bytes = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n{}\r\nbody",
+        "X-Header: value\r\n".repeat(500)
+    );
     let mut status = HttpStatusParser::new(Cursor::new(bytes.into_bytes()));
     block_on(status.status()).unwrap();
     let mut headers = status.into_headers();
-    assert_eq!(block_on(headers.next_header()).unwrap(), Some(("Content-Length", "4")));
+    assert_eq!(
+        block_on(headers.next_header()).unwrap(),
+        Some(("Content-Length", "4"))
+    );
     for _ in 0..500 {
-        assert_eq!(block_on(headers.next_header()).unwrap(), Some(("X-Header", "value")));
+        assert_eq!(
+            block_on(headers.next_header()).unwrap(),
+            Some(("X-Header", "value"))
+        );
     }
     assert_eq!(block_on(headers.next_header()).unwrap(), None);
     assert_eq!(block_on(headers.body(4)).unwrap(), b"body");
