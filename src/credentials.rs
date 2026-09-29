@@ -14,12 +14,10 @@ impl<'a> WebhookCredentials<'a> {
             return Err(Error::InvalidWebhookUrl);
         }
 
-        let id;
-
-        match &url[33..].find('/') {
-            Some(i) => id = *i,
+        let id = match &url[33..].find('/') {
+            Some(i) => *i,
             None => return Err(Error::InvalidWebhookUrl),
-        }
+        };
 
         if id + 1 == url.len() {
             // no token, ending with '/'
