@@ -4,7 +4,9 @@ use std::{
 };
 
 use crate::{
-    Error::HttpParseError, Result, WebhookCredentials, chunk_writer::ChunkWriter,
+    Error::HttpParseError,
+    Result, WebhookCredentials,
+    chunk_writer::ChunkWriter,
     http::HttpStatusParser,
 };
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -200,24 +202,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
             parser.feed(&buf[..n]);
         }
 
-        let body_size = parser.body_size().ok_or(HttpParseError)?;
-
-        if body_size > MAX_RESPONSE_BODYSIZE {
-            return Err(HttpParseError);
-        }
-
-        let mut body: Vec<u8> = parser.remaining();
-
-        if body.len() > body_size {
-            return Err(HttpParseError);
-        }
-
-        let already_read = body.len();
-
-        body.resize(body_size, 0);
-
-        self.connection
-            .read_exact(&mut body[already_read..])
+        let body = parser
+            .body(&mut self.connection, MAX_RESPONSE_BODYSIZE)
             .await?;
 
         if status != 200 {

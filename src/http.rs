@@ -1,4 +1,8 @@
 use crate::{Error::HttpParseError, Result};
+use futures::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt,
+    io::{BufReader, Cursor},
+};
 
 struct LineParser {
     buf: Vec<u8>,
@@ -67,6 +71,7 @@ pub(crate) struct HttpStatusParser {
 pub(crate) struct HttpHeaderParser {
     lines: LineParser,
     content_length: Option<usize>,
+    chunked: bool,
     done: bool,
 }
 
@@ -99,6 +104,7 @@ impl HttpStatusParser {
         HttpHeaderParser {
             lines: self.lines,
             content_length: None,
+            chunked: false,
             done: false,
         }
     }
@@ -123,6 +129,9 @@ impl HttpHeaderParser {
 
         // Empty line => end of headers
         if line.is_empty() {
+            if self.chunked && self.content_length.is_some() {
+                return Err(HttpParseError);
+            }
             self.done = true;
             return Ok(None);
         }
@@ -143,6 +152,15 @@ impl HttpHeaderParser {
             self.content_length = Some(len);
         }
 
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            // Only plain chunked encoding is supported. Other transfer codings
+            // would require additional decoding before parsing the JSON body.
+            if self.chunked || !value.eq_ignore_ascii_case("chunked") {
+                return Err(HttpParseError);
+            }
+            self.chunked = true;
+        }
+
         Ok(Some((name, value)))
     }
 
@@ -150,11 +168,130 @@ impl HttpHeaderParser {
         self.content_length
     }
 
+    pub(crate) fn is_chunked(&self) -> bool {
+        self.chunked
+    }
+
     pub(crate) fn is_complete(&self) -> bool {
         self.done
     }
 
+    /// Read the response body using the framing specified by its headers.
+    pub(crate) async fn body<T: AsyncRead + Unpin>(
+        self,
+        mut connection: T,
+        max_size: usize,
+    ) -> Result<Vec<u8>> {
+        if self.is_chunked() {
+            read_chunked_body(&mut connection, self.remaining(), max_size).await
+        } else {
+            read_body(&mut connection, self, max_size).await
+        }
+    }
+
     pub(crate) fn remaining(self) -> Vec<u8> {
         self.lines.remaining()
+    }
+}
+
+/// Read a response body with Content-Length, keeping bytes read with the headers.
+pub(crate) async fn read_body<T: AsyncRead + Unpin>(
+    connection: &mut T,
+    parser: HttpHeaderParser,
+    max_size: usize,
+) -> Result<Vec<u8>> {
+    let body_size = parser.body_size().ok_or(HttpParseError)?;
+    if body_size > max_size {
+        return Err(HttpParseError);
+    }
+
+    let mut body = parser.remaining();
+    if body.len() > body_size {
+        return Err(HttpParseError);
+    }
+    let already_read = body.len();
+    body.resize(body_size, 0);
+    connection.read_exact(&mut body[already_read..]).await?;
+    Ok(body)
+}
+
+// Bound framing metadata independently of the decoded body size.
+const MAX_CHUNK_LINE_SIZE: usize = 8192;
+const MAX_TRAILERS_SIZE: usize = 16384;
+
+async fn read_chunk_line<T: AsyncBufRead + Unpin>(
+    reader: &mut T,
+    line: &mut Vec<u8>,
+) -> Result<()> {
+    line.clear();
+    reader
+        .take((MAX_CHUNK_LINE_SIZE + 1) as u64)
+        .read_until(b'\n', line)
+        .await?;
+    if line.len() > MAX_CHUNK_LINE_SIZE || !line.ends_with(b"\r\n") {
+        return Err(HttpParseError);
+    }
+    Ok(())
+}
+
+/// Decode a chunked response, starting with body bytes read with the headers.
+pub(crate) async fn read_chunked_body<T: AsyncRead + Unpin>(
+    connection: &mut T,
+    buffered: Vec<u8>,
+    max_size: usize,
+) -> Result<Vec<u8>> {
+    let mut reader = BufReader::with_capacity(1024, Cursor::new(buffered).chain(connection));
+    let mut body = Vec::new();
+    let mut line = Vec::new();
+
+    loop {
+        read_chunk_line(&mut reader, &mut line).await?;
+        if !line.first().is_some_and(u8::is_ascii_hexdigit) {
+            return Err(HttpParseError);
+        }
+        let size = match httparse::parse_chunk_size(&line).map_err(|_| HttpParseError)? {
+            httparse::Status::Complete((_, size)) => {
+                usize::try_from(size).map_err(|_| HttpParseError)?
+            }
+            httparse::Status::Partial => return Err(HttpParseError),
+        };
+
+        if size == 0 {
+            break;
+        }
+        if size > max_size - body.len() {
+            return Err(HttpParseError);
+        }
+
+        let start = body.len();
+        body.resize(start + size, 0);
+        reader.read_exact(&mut body[start..]).await?;
+        let mut delimiter = [0; 2];
+        reader.read_exact(&mut delimiter).await?;
+        if delimiter != *b"\r\n" {
+            return Err(HttpParseError);
+        }
+    }
+
+    // The zero chunk is followed by trailers and an empty line, even when
+    // no trailers are present. Do not wait for EOF on a persistent connection.
+    let mut trailers_size = 0;
+    loop {
+        read_chunk_line(&mut reader, &mut line).await?;
+        trailers_size += line.len();
+        if trailers_size > MAX_TRAILERS_SIZE {
+            return Err(HttpParseError);
+        }
+        if line == b"\r\n" {
+            return Ok(body);
+        }
+        line.extend_from_slice(b"\r\n");
+        let mut headers = [httparse::EMPTY_HEADER; 1];
+        if !matches!(
+            httparse::parse_headers(&line, &mut headers)?,
+            httparse::Status::Complete(_)
+        ) {
+            return Err(HttpParseError);
+        }
     }
 }

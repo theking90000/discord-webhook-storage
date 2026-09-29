@@ -22,6 +22,9 @@ struct State {
     require_complete_request: bool,
     pending_writes: bool,
     yield_write: bool,
+    pending_reads: bool,
+    yield_read: bool,
+    error_on_eof: bool,
     fail_read: bool,
     fail_write: bool,
     fail_flush: bool,
@@ -48,12 +51,22 @@ impl Transport {
 impl AsyncRead for Transport {
     fn poll_read(
         self: Pin<&mut Self>,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let mut state = self.0.borrow_mut();
         if state.fail_read {
             return Poll::Ready(Err(io::Error::other("read failed")));
+        }
+        if state.error_on_eof && state.read_at == state.response.len() {
+            return Poll::Ready(Err(io::Error::other("read beyond response")));
+        }
+        if state.pending_reads {
+            state.yield_read = !state.yield_read;
+            if state.yield_read {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
         }
         if state.require_complete_request
             && (!state.written.ends_with(b"0\r\n\r\n") || state.flushes == 0)
@@ -421,4 +434,135 @@ fn finish_reports_read_failures_and_truncated_body() {
         block_on(opened(&transport).finish()),
         Err(Error::IoError)
     ));
+}
+
+fn chunked_response(encoded: &[u8]) -> Vec<u8> {
+    let mut response = b"HTTP/1.1 200 OK\r\ntransfer-encoding: ChUnKeD\r\n\r\n".to_vec();
+    response.extend_from_slice(encoded);
+    response
+}
+
+#[test]
+fn finish_decodes_fragmented_chunks_extensions_and_trailers_without_eof() {
+    let json_body = br#"{"id":"message-1","attachments":[{"url":"https://cdn.example/file"}]}"#;
+    for with_trailers in [false, true] {
+        let mut encoded = Vec::new();
+        for chunk in json_body.chunks(11) {
+            encoded
+                .extend_from_slice(format!("{:x};ignored=\"value\"\r\n", chunk.len()).as_bytes());
+            encoded.extend_from_slice(chunk);
+            encoded.extend_from_slice(b"\r\n");
+        }
+        encoded.extend_from_slice(b"0;ignored=value\r\n");
+        if with_trailers {
+            encoded.extend_from_slice(b"X-Checksum: ignored\r\nX-Other: value\r\n");
+        }
+        encoded.extend_from_slice(b"\r\n");
+        for read_size in [1, 2, 7, 1024] {
+            let transport = Transport::new(chunked_response(&encoded));
+            {
+                let mut state = transport.0.borrow_mut();
+                state.max_read = read_size;
+                state.pending_reads = true;
+                state.error_on_eof = true;
+            }
+            let result = block_on(opened(&transport).finish()).unwrap();
+            assert_eq!(
+                serde_json::to_value(result).unwrap(),
+                json!({"id":"message-1","url":"https://cdn.example/file"})
+            );
+            let state = transport.0.borrow();
+            assert_eq!(state.read_at, state.response.len());
+        }
+    }
+}
+
+#[test]
+fn finish_limits_decoded_chunked_body_size() {
+    let json_body = r#"{"id":"x","attachments":[{"url":"x"}]}"#;
+    let body = format!("{json_body}{}", " ".repeat(16384 - json_body.len()));
+    let encoded = format!("4000\r\n{body}\r\n0\r\n\r\n");
+    let transport = Transport::new(chunked_response(encoded.as_bytes()));
+    block_on(opened(&transport).finish()).unwrap();
+
+    // Reject an oversized announcement before waiting for its data, and also
+    // reject multiple chunks whose combined decoded size exceeds the limit.
+    for encoded in ["4001\r\n".to_string(), format!("4000\r\n{body}\r\n1\r\n")] {
+        let transport = Transport::new(chunked_response(encoded.as_bytes()));
+        assert!(matches!(
+            block_on(opened(&transport).finish()),
+            Err(Error::HttpParseError)
+        ));
+    }
+}
+
+#[test]
+fn finish_rejects_invalid_chunk_framing_and_trailers() {
+    for encoded in [
+        b"Z\r\n".as_slice(),
+        b"+1\r\nx\r\n0\r\n\r\n",
+        b"\r\n\r\n",
+        b";extension\r\n\r\n",
+        b"10000000000000000\r\n",
+        b"FFFFFFFFFFFFFFFF\r\n",
+        b"1\nx\r\n0\r\n\r\n",
+        b"1\r\nxXX0\r\n\r\n",
+        b"0\r\nBroken-Trailer\r\n\r\n",
+    ] {
+        let transport = Transport::new(chunked_response(encoded));
+        assert!(
+            matches!(
+                block_on(opened(&transport).finish()),
+                Err(Error::HttpParseError)
+            ),
+            "{encoded:?}"
+        );
+    }
+    let oversized_line = format!("1;{}\r\n", "x".repeat(8192));
+    let oversized_trailers = format!("0\r\n{}\r\n", "X-Trailer: x\r\n".repeat(1400));
+    for encoded in [oversized_line, oversized_trailers] {
+        let transport = Transport::new(chunked_response(encoded.as_bytes()));
+        assert!(matches!(
+            block_on(opened(&transport).finish()),
+            Err(Error::HttpParseError)
+        ));
+    }
+}
+
+#[test]
+fn finish_rejects_truncated_chunked_responses() {
+    for encoded in [
+        b"".as_slice(),
+        b"1\r",
+        b"3\r\nx",
+        b"1\r\nx",
+        b"1\r\nx\r\n",
+        b"0\r\n",
+        b"0\r\nX-Trailer: value\r\n",
+    ] {
+        let transport = Transport::new(chunked_response(encoded));
+        assert!(
+            block_on(opened(&transport).finish()).is_err(),
+            "{encoded:?}"
+        );
+    }
+}
+
+#[test]
+fn finish_rejects_ambiguous_and_unsupported_transfer_encodings() {
+    for headers in [
+        "Transfer-Encoding: chunked\r\nContent-Length: 2\r\n",
+        "Content-Length: 2\r\nTransfer-Encoding: chunked\r\n",
+        "Transfer-Encoding: gzip, chunked\r\n",
+        "Transfer-Encoding: chunked, gzip\r\n",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
+        "Transfer-Encoding: \r\n",
+    ] {
+        let transport =
+            Transport::new(format!("HTTP/1.1 200 OK\r\n{headers}\r\n0\r\n\r\n").into_bytes());
+        assert!(matches!(
+            block_on(opened(&transport).finish()),
+            Err(Error::HttpParseError)
+        ));
+    }
 }
