@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{Error::{self, HttpParseError}, Result, WebhookCredentials, http::HttpStatusParser};
+use crate::{Error::HttpParseError, Result, WebhookCredentials, http::HttpStatusParser};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 // as of 29 september 2026 (might change in the future)
 const DISCORD_PAYLOAD_LIMIT: usize = 20_000_000;
 
-// Do not read the response if the body response size 
+// Do not read the response if the body response size
 // is more than 16kB. This is a safeguard to avoid memory over-usage
 // and OS crashes because of memory allocations
 const MAX_RESPONSE_BODYSIZE: usize = 16384;
@@ -175,7 +175,7 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
     /// Read the server HTTP response
-    /// And 
+    /// And
     pub async fn finish(mut self) -> Result<WrittenFile> {
         // ensure we are in a closed state.
         self.close().await?;
@@ -201,7 +201,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
 
         loop {
             while let Some((_name, _value)) = parser.next_header()? {
-                // process headers ; principally rate limit and stuff 
+                // process headers ; principally rate limit and stuff
             }
 
             if parser.is_complete() {
@@ -221,9 +221,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
             return Err(HttpParseError);
         }
 
-        let body_size = parser
-            .body_size()
-            .ok_or(HttpParseError)?;
+        let body_size = parser.body_size().ok_or(HttpParseError)?;
 
         if body_size > MAX_RESPONSE_BODYSIZE {
             return Err(HttpParseError);
@@ -246,18 +244,23 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
         // body contains exactly our JSON payload
         let json = serde_json::from_slice::<Value>(&body)?;
 
-        let id = json.get("id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(HttpParseError)?;
+        let id = json
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(HttpParseError)?;
 
-        let url = json.get("attachments")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.get(0))
-                    .and_then(|v| v.get("url"))
-                    .and_then(|v| v.as_str())
-                    .ok_or(HttpParseError)?;
+        let url = json
+            .get("attachments")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("url"))
+            .and_then(|v| v.as_str())
+            .ok_or(HttpParseError)?;
 
-        Ok(WrittenFile { id: id.to_string(), url: url.to_string() })
+        Ok(WrittenFile {
+            id: id.to_string(),
+            url: url.to_string(),
+        })
     }
 }
 

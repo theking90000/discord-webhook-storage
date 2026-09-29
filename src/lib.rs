@@ -2,8 +2,8 @@
 
 mod credentials;
 mod error;
-mod write;
 mod http;
+mod write;
 
 pub use credentials::WebhookCredentials;
 pub use error::{Error, Result};

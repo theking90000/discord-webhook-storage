@@ -1,6 +1,6 @@
 use crate::{Error::HttpParseError, Result};
 
- struct LineParser {
+struct LineParser {
     buf: Vec<u8>,
     start: usize,
     search_pos: usize,
@@ -30,9 +30,7 @@ impl LineParser {
     }
 
     fn next_line(&mut self) -> Option<&[u8]> {
-        let relative = self.buf[self.search_pos..]
-            .iter()
-            .position(|&b| b == b'\n');
+        let relative = self.buf[self.search_pos..].iter().position(|&b| b == b'\n');
 
         let pos = match relative {
             Some(pos) => self.search_pos + pos,
@@ -74,7 +72,9 @@ pub(crate) struct HttpHeaderParser {
 
 impl HttpStatusParser {
     pub(crate) fn new() -> Self {
-        Self { lines: LineParser::new() }
+        Self {
+            lines: LineParser::new(),
+        }
     }
 
     pub(crate) fn feed(&mut self, data: &[u8]) {
@@ -88,13 +88,9 @@ impl HttpStatusParser {
 
         let line = str::from_utf8(line)?;
 
-        let rest = line
-            .strip_prefix("HTTP/1.1 ")
-            .ok_or(HttpParseError)?;
+        let rest = line.strip_prefix("HTTP/1.1 ").ok_or(HttpParseError)?;
 
-        let (status, _) = rest
-            .split_once(' ')
-            .ok_or(HttpParseError)?;
+        let (status, _) = rest.split_once(' ').ok_or(HttpParseError)?;
 
         Ok(Some(status.parse()?))
     }
@@ -131,16 +127,12 @@ impl HttpHeaderParser {
             return Ok(None);
         }
 
-        let (name, value) = line
-            .split_once(':')
-            .ok_or(HttpParseError)?;
+        let (name, value) = line.split_once(':').ok_or(HttpParseError)?;
 
         let value = value.trim_ascii();
 
         if name.eq_ignore_ascii_case("content-length") {
-            let len = value
-                .parse::<usize>()
-                .map_err(|_| HttpParseError)?;
+            let len = value.parse::<usize>().map_err(|_| HttpParseError)?;
 
             if let Some(previous) = self.content_length {
                 if previous != len {
