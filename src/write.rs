@@ -3,7 +3,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{Error::HttpParseError, Result, WebhookCredentials, http::HttpStatusParser, chunk_writer::ChunkWriter};
+use crate::{
+    Error::HttpParseError, Result, WebhookCredentials, chunk_writer::ChunkWriter,
+    http::HttpStatusParser,
+};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -32,7 +35,7 @@ enum WriteFileState {
     Writing(usize),
     /// closing boundary
     Closing(usize, Vec<u8>),
-    Flushing,
+    Finalizing,
     Closed,
 }
 
@@ -98,27 +101,40 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
     ) -> Result<Self> {
         let boundary = generate_boundary();
         // Send HTTP Headers
-        connection.write_all(
-            format_bytes!("POST /api/webhooks/{}/{}?wait=true HTTP/1.1\r\n\
+        connection
+            .write_all(format_bytes!(
+                "POST /api/webhooks/{}/{}?wait=true HTTP/1.1\r\n\
             Host: discord.com\r\n\
             Transfer-Encoding: chunked\r\n\
             Content-Type: multipart/form-data; boundary={}\r\n\
-            \r\n", 
-            credentials.id, credentials.token, &boundary)
-        ).await?;
+            \r\n",
+                credentials.id,
+                credentials.token,
+                &boundary
+            ))
+            .await?;
 
         // At this point we use chunked transfert encoding
         let mut connection = ChunkWriter::new(connection);
-       
-        connection.write_all(format_bytes!("--{}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\
-        Content-Type: application/json\r\n\r\n\
-        {}\r\n", &boundary, &serde_json::to_string(&config.as_request())?)).await?;
-           
 
-        connection.write_all(
-                &format_bytes!("--{}\r\n\
-                Content-Disposition: form-data; name=\"files[0]\"; filename=\"{}\"\r\n\r\n", &boundary, &config.filename)
-        ).await?;
+        connection
+            .write_all(format_bytes!(
+                "--{}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\
+        Content-Type: application/json\r\n\r\n\
+        {}\r\n",
+                &boundary,
+                &serde_json::to_string(&config.as_request())?
+            ))
+            .await?;
+
+        connection
+            .write_all(&format_bytes!(
+                "--{}\r\n\
+                Content-Disposition: form-data; name=\"files[0]\"; filename=\"{}\"\r\n\r\n",
+                &boundary,
+                &config.filename
+            ))
+            .await?;
 
         Ok(Self {
             connection,
@@ -143,13 +159,10 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
-    /// Read the server HTTP response
-    /// And
+    /// Finish the request body and read the server HTTP response.
     pub async fn finish(mut self) -> Result<WrittenFile> {
-        println!("OK?>");
         // ensure we are in a closed state.
         self.close().await?;
-        println!("closed");
 
         let mut parser = HttpStatusParser::new();
         // buf used to parse headers.
@@ -157,12 +170,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
 
         let status = loop {
             if let Some(status) = parser.status()? {
-                println!("status {}",status);
                 break status;
             }
-            println!("read");
             let n = self.connection.read(&mut buf).await?;
-            println!("read{}",n);
             if n == 0 {
                 return Err(HttpParseError);
             }
@@ -174,7 +184,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
 
         loop {
             while let Some((_name, _value)) = parser.next_header()? {
-                // eprintln!("Header: {_name}: {_value}")
+                eprintln!("Header: {_name}: {_value}");
                 // process headers ; principally rate limit and stuff
             }
 
@@ -255,7 +265,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
 
         if let Poll::Ready(Ok(n)) = result {
             this.state = WriteFileState::Writing(remaining - n);
-        }        
+        }
 
         result
     }
@@ -301,10 +311,12 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
                     match Pin::new(&mut this.connection).poll_write(cx, &buf[*n..]) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(0)) => {
+                            return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                        }
                         Poll::Ready(Ok(nr)) => {
                             if (nr + (*n)) == buf.len() {
-                                this.state = WriteFileState::Flushing;
-                                // return Poll::Ready(Ok(()));
+                                this.state = WriteFileState::Finalizing;
                             } else {
                                 // advance Vec pointer by nr
                                 *n += nr;
@@ -312,7 +324,9 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
                         }
                     }
                 }
-                WriteFileState::Flushing => match Pin::new(&mut this.connection).poll_flush(cx) {
+                // Finish HTTP chunk framing after the multipart closing boundary.
+                // ChunkWriter::poll_close keeps the transport open for the response.
+                WriteFileState::Finalizing => match Pin::new(&mut this.connection).poll_close(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Ready(Ok(())) => {
