@@ -1,6 +1,5 @@
 use crate::{Error, Result};
 
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookCredentials<'a> {
     pub(crate) id: &'a str,
@@ -14,22 +13,22 @@ impl<'a> WebhookCredentials<'a> {
         if !url.starts_with("https://discord.com/api/webhooks/") {
             return Err(Error::InvalidWebhookUrl);
         }
-        
+
         let id;
-        
+
         match &url[33..].find('/') {
             Some(i) => id = *i,
-            None => return Err(Error::InvalidWebhookUrl)
+            None => return Err(Error::InvalidWebhookUrl),
         }
 
-        if id+1 == url.len() {
+        if id + 1 == url.len() {
             // no token, ending with '/'
-            return Err(Error::InvalidWebhookUrl)
+            return Err(Error::InvalidWebhookUrl);
         }
 
-        Ok(WebhookCredentials { 
-            id: &url[33..(33+id)], 
-            token: &url[id+33+1..]
+        Ok(WebhookCredentials {
+            id: &url[33..(33 + id)],
+            token: &url[id + 33 + 1..],
         })
     }
 }
@@ -51,18 +50,30 @@ mod test {
 
         let result = WebhookCredentials::parse(test);
 
-        assert_eq!(result, Ok(WebhookCredentials {
-            id: "webhookid",
-            token: "supertoken"
-        }))
+        assert_eq!(
+            result,
+            Ok(WebhookCredentials {
+                id: "webhookid",
+                token: "supertoken"
+            })
+        )
     }
 
     #[test]
     fn test_invalid_url() {
         assert_eq!(WebhookCredentials::parse(""), Err(InvalidWebhookUrl));
         assert_eq!(WebhookCredentials::parse("tokenid"), Err(InvalidWebhookUrl));
-        assert_eq!(WebhookCredentials::parse("https://discord.com/api/"), Err(InvalidWebhookUrl));
-        assert_eq!(WebhookCredentials::parse("https://discord.com/api/webhookid"), Err(InvalidWebhookUrl));
-        assert_eq!(WebhookCredentials::parse("https://discord.com/api/webhookid/"), Err(InvalidWebhookUrl));
+        assert_eq!(
+            WebhookCredentials::parse("https://discord.com/api/"),
+            Err(InvalidWebhookUrl)
+        );
+        assert_eq!(
+            WebhookCredentials::parse("https://discord.com/api/webhookid"),
+            Err(InvalidWebhookUrl)
+        );
+        assert_eq!(
+            WebhookCredentials::parse("https://discord.com/api/webhookid/"),
+            Err(InvalidWebhookUrl)
+        );
     }
 }

@@ -1,10 +1,13 @@
-use std::{pin::Pin, task::{Context, Poll}};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use crate::{Error, Result, WebhookCredentials, write::WriteFileState::Writing};
-use futures::{AsyncWriteExt, AsyncReadExt, AsyncRead, AsyncWrite};
-use rand::{distr::Alphanumeric, RngExt};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // Discord limits to exactly 20MB the file payload
 // as of 29 september 2026 (might change in the future)
@@ -50,9 +53,9 @@ impl WriteConfig {
 
 impl Default for WriteConfig {
     fn default() -> Self {
-        WriteConfig { 
-            filename: "file.bin".into(), 
-            payload_limit: DISCORD_PAYLOAD_LIMIT
+        WriteConfig {
+            filename: "file.bin".into(),
+            payload_limit: DISCORD_PAYLOAD_LIMIT,
         }
     }
 }
@@ -89,35 +92,53 @@ fn generate_boundary() -> String {
 
 impl<T: AsyncWrite + Unpin> WriteFile<T> {
     /// Open a new writable file to a Discord webhook.
-    /// @param connection - Holds an open TCP/TLS connection to discord.com:443
-    /// @param credentials - the webhook credentials used for this request
-    /// @param config - the custom webhook configuration
+    /// * `connection` - Holds an open TCP/TLS connection to discord.com:443
+    /// * `credentials` - the webhook credentials used for this request
+    /// * `config` - the custom webhook configuration
     pub async fn open(
-        mut connection: T,  
+        mut connection: T,
         credentials: &WebhookCredentials<'_>,
         config: &WriteConfig,
     ) -> Result<Self> {
         let boundary = generate_boundary();
 
-        write_vectored!(connection, [
-            format_bytes!("POST /api/webhooks/{}/{}%3Fwait=true HTTP/1.1\r\n", credentials.id, credentials.token),
-            format_bytes!("Host: discord.com\r\n"),
-            format_bytes!("Content-Type: multipart/form-data; boundary={}\r\n", &boundary),
-            format_bytes!("\r\n"),
-        ])?;
+        write_vectored!(
+            connection,
+            [
+                format_bytes!(
+                    "POST /api/webhooks/{}/{}%3Fwait=true HTTP/1.1\r\n",
+                    credentials.id,
+                    credentials.token
+                ),
+                format_bytes!("Host: discord.com\r\n"),
+                format_bytes!(
+                    "Content-Type: multipart/form-data; boundary={}\r\n",
+                    &boundary
+                ),
+                format_bytes!("\r\n"),
+            ]
+        )?;
 
-        write_vectored!(connection, [
-            format_bytes!("--{}\r\n", boundary),
-            format_bytes!("Content-Disposition: form-data; name=\"payload_json\"\r\n"),
-            format_bytes!("Content-Type: application/json\r\n\r\n"),
-            serde_json::to_vec(&config.as_request())?,
-            format_bytes!("\r\n"),
-        ])?;
+        write_vectored!(
+            connection,
+            [
+                format_bytes!("--{}\r\n", boundary),
+                format_bytes!("Content-Disposition: form-data; name=\"payload_json\"\r\n"),
+                format_bytes!("Content-Type: application/json\r\n\r\n"),
+                serde_json::to_vec(&config.as_request())?,
+                format_bytes!("\r\n"),
+            ]
+        )?;
 
-        write_vectored!(connection, [
-            format_bytes!("--{}\r\n", &boundary),
-            format_bytes!("Content-Disposition: form-data; name=\"files[0]\"; filename=\"data.bin\"\r\n\r\n")
-        ])?;
+        write_vectored!(
+            connection,
+            [
+                format_bytes!("--{}\r\n", &boundary),
+                format_bytes!(
+                    "Content-Disposition: form-data; name=\"files[0]\"; filename=\"data.bin\"\r\n\r\n"
+                )
+            ]
+        )?;
 
         Ok(Self {
             connection,
@@ -129,19 +150,21 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
 
     fn remaining_write(&self, buf_len: usize) -> std::io::Result<usize> {
         match self.state {
-            Writing(n) => 
+            Writing(n) => {
                 if buf_len <= n {
                     Ok(n)
                 } else {
                     Err(std::io::Error::other("file is not writable"))
-                },
-            _  => Err(std::io::Error::other("file is not writable"))
+                }
+            }
+            _ => Err(std::io::Error::other("file is not writable")),
         }
     }
 }
 
 impl<T: AsyncRead + Unpin> WriteFile<T> {
-    pub async fn finish(mut self) -> Result<()> { // should return a FileIdentifier
+    pub async fn finish(mut self) -> Result<()> {
+        // should return a FileIdentifier
         // Read server response!
         todo!();
 
@@ -193,21 +216,13 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         result
     }
 
-     fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
 
         Pin::new(&mut this.connection).poll_flush(cx)
     }
 
-    
-
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
 
         loop {
@@ -215,13 +230,13 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
                 WriteFileState::Writing(_) => {
                     let buf = format_bytes!("\r\n--{}--\r\n", &this.boundary);
                     this.state = WriteFileState::Closing(0, buf);
-                },
-                WriteFileState::Closing (n, buf) => {
+                }
+                WriteFileState::Closing(n, buf) => {
                     match Pin::new(&mut this.connection).poll_write(cx, &buf[*n..]) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                         Poll::Ready(Ok(nr)) => {
-                            if (nr+(*n)) == buf.len() {
+                            if (nr + (*n)) == buf.len() {
                                 this.state = WriteFileState::Flushing;
                                 // return Poll::Ready(Ok(()));
                             } else {
@@ -230,17 +245,15 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
                             }
                         }
                     }
-                },
-                WriteFileState::Flushing => {
-                    match Pin::new(&mut this.connection).poll_flush(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                        Poll::Ready(Ok(())) => {
-                            this.state = WriteFileState::Closed;
-                            return Poll::Ready(Ok(()));
-                        }
-                    }
                 }
+                WriteFileState::Flushing => match Pin::new(&mut this.connection).poll_flush(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(())) => {
+                        this.state = WriteFileState::Closed;
+                        return Poll::Ready(Ok(()));
+                    }
+                },
                 WriteFileState::Closed => return Poll::Ready(Ok(())),
             }
         }

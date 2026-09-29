@@ -2,13 +2,13 @@ use std::fmt;
 
 use crate::Error::JsonError;
 
-/// A format, resource, or transformation failure. 
+/// A format, resource, or transformation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Error {
-   InvalidWebhookUrl,
-   IoError,
-   JsonError,
+    InvalidWebhookUrl,
+    IoError,
+    JsonError,
 }
 
 impl fmt::Display for Error {

@@ -1,8 +1,9 @@
 #![doc = include_str!("../README.md")]
 
-mod write;
-mod error;
 mod credentials;
+mod error;
+mod write;
 
+pub use credentials::WebhookCredentials;
 pub use error::{Error, Result};
-pub use credentials::{WebhookCredentials};
+pub use write::{WriteConfig, WriteFile};
