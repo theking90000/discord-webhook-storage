@@ -8,7 +8,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use discord_webhook_storage::{Error, WebhookCredentials, WriteConfig, WriteFile};
+use discord_webhook_storage::{Error, HttpError, ResponseError, WebhookCredentials, WebhookUrlError, WriteConfig, WriteError, WriteFile};
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, executor::block_on};
 use serde_json::json;
 
@@ -196,18 +196,18 @@ fn decode_request(request: &[u8]) -> (&str, Vec<u8>) {
 fn credentials_accept_url_and_try_from() {
     let url = "https://discord.com/api/webhooks/123/token";
     assert_eq!(
-        WebhookCredentials::parse(url),
-        WebhookCredentials::try_from(url)
+        WebhookCredentials::parse(url).unwrap(),
+        WebhookCredentials::try_from(url).unwrap()
     );
     for invalid in [
         "",
         "http://discord.com/api/webhooks/123/token",
         "https://discord.com/api/webhooks/123",
     ] {
-        assert_eq!(
+        assert!(matches!(
             WebhookCredentials::parse(invalid),
-            Err(Error::InvalidWebhookUrl)
-        );
+            Err(Error::InvalidWebhookUrl(_))
+        ));
     }
 }
 
@@ -263,10 +263,7 @@ fn zero_bytes_and_repeated_close_write_one_terminator() {
     assert!(decode_request(&request).1.ends_with(b"--\r\n"));
     assert_eq!(transport.0.borrow().closes, 0);
     assert_eq!(transport.0.borrow().flushes, 1);
-    assert_eq!(
-        block_on(file.write(&[1])).unwrap_err().kind(),
-        io::ErrorKind::Other
-    );
+    assert_write_rejection(block_on(file.write(&[1])).unwrap_err(), WriteError::NotWritable);
 }
 
 #[test]
@@ -299,16 +296,14 @@ fn file_limit_applies_to_scalar_and_vectored_writes() {
     let mut file = opened(&transport);
     let large = vec![7; 20_000_000];
     block_on(file.write_all(&large)).unwrap();
-    assert_eq!(
-        block_on(file.write(&[1])).unwrap_err().kind(),
-        io::ErrorKind::Other
+    let before = transport.written().len();
+    let expected = WriteError::PayloadLimitExceeded { remaining: 0, attempted: 1 };
+    assert_write_rejection(block_on(file.write(&[1])).unwrap_err(), expected);
+    assert_write_rejection(
+        block_on(file.write_vectored(&[IoSlice::new(&[1])])).unwrap_err(),
+        expected,
     );
-    assert_eq!(
-        block_on(file.write_vectored(&[IoSlice::new(&[1])]))
-            .unwrap_err()
-            .kind(),
-        io::ErrorKind::Other
-    );
+    assert_eq!(transport.written().len(), before);
 
     let transport = Transport::new(Vec::new());
     let mut file = opened(&transport);
@@ -329,7 +324,7 @@ fn flush_and_transport_errors_are_reported() {
             &credentials(),
             &WriteConfig::default()
         )),
-        Err(Error::IoError)
+        Err(Error::IoError(error)) if error.to_string() == "write failed"
     ));
 
     let transport = Transport::new(Vec::new());
@@ -382,7 +377,6 @@ fn finish_completes_request_before_reading_response() {
 #[test]
 fn finish_rejects_http_status_and_header_errors() {
     let cases = [
-        response("400 Bad Request", "{}"),
         b"not http\r\n\r\n".to_vec(),
         b"HTTP/1.1 200 OK\r\nBad-Header\r\n\r\n".to_vec(),
         b"HTTP/1.1 200 OK\r\n\r\n{}".to_vec(),
@@ -397,7 +391,7 @@ fn finish_rejects_http_status_and_header_errors() {
         let transport = Transport::new(bytes);
         assert!(matches!(
             block_on(opened(&transport).finish()),
-            Err(Error::HttpParseError)
+            Err(Error::HttpParseError(_))
         ));
     }
 }
@@ -413,12 +407,12 @@ fn finish_rejects_invalid_json_and_missing_fields() {
         r#"{"id":"x","attachments":[{"url":7}]}"#,
     ] {
         let transport = Transport::new(response("200 OK", body));
-        let expected = if body == "not json" {
-            Error::JsonError
+        let error = block_on(opened(&transport).finish()).err().unwrap();
+        if body == "not json" {
+            assert!(matches!(error, Error::JsonError(_)));
         } else {
-            Error::HttpParseError
-        };
-        assert!(matches!(block_on(opened(&transport).finish()), Err(error) if error == expected));
+            assert!(matches!(error, Error::InvalidResponse(_)));
+        }
     }
 }
 
@@ -428,13 +422,13 @@ fn finish_reports_read_failures_and_truncated_body() {
     transport.0.borrow_mut().fail_read = true;
     assert!(matches!(
         block_on(opened(&transport).finish()),
-        Err(Error::IoError)
+        Err(Error::IoError(error)) if error.to_string() == "read failed"
     ));
 
     let transport = Transport::new(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n{}".to_vec());
     assert!(matches!(
         block_on(opened(&transport).finish()),
-        Err(Error::IoError)
+        Err(Error::IoError(error)) if error.kind() == io::ErrorKind::UnexpectedEof
     ));
 }
 
@@ -493,7 +487,7 @@ fn finish_limits_decoded_chunked_body_size() {
         let transport = Transport::new(chunked_response(encoded.as_bytes()));
         assert!(matches!(
             block_on(opened(&transport).finish()),
-            Err(Error::HttpParseError)
+            Err(Error::HttpParseError(_))
         ));
     }
 }
@@ -515,7 +509,7 @@ fn finish_rejects_invalid_chunk_framing_and_trailers() {
         assert!(
             matches!(
                 block_on(opened(&transport).finish()),
-                Err(Error::HttpParseError)
+                Err(Error::HttpParseError(_))
             ),
             "{encoded:?}"
         );
@@ -526,7 +520,7 @@ fn finish_rejects_invalid_chunk_framing_and_trailers() {
         let transport = Transport::new(chunked_response(encoded.as_bytes()));
         assert!(matches!(
             block_on(opened(&transport).finish()),
-            Err(Error::HttpParseError)
+            Err(Error::HttpParseError(_))
         ));
     }
 }
@@ -564,7 +558,92 @@ fn finish_rejects_ambiguous_and_unsupported_transfer_encodings() {
             Transport::new(format!("HTTP/1.1 200 OK\r\n{headers}\r\n0\r\n\r\n").into_bytes());
         assert!(matches!(
             block_on(opened(&transport).finish()),
-            Err(Error::HttpParseError)
+            Err(Error::HttpParseError(_))
         ));
+    }
+}
+
+fn assert_write_rejection(error: io::Error, expected: WriteError) {
+    let kind = match expected {
+        WriteError::NotWritable => io::ErrorKind::BrokenPipe,
+        _ => io::ErrorKind::InvalidInput,
+    };
+    assert_eq!(error.kind(), kind);
+    let cause = error.get_ref().unwrap().downcast_ref::<Error>().unwrap();
+    assert!(matches!(cause, Error::WriteError(actual) if *actual == expected));
+}
+
+#[test]
+fn rejected_status_preserves_code_and_body_without_requiring_json() {
+    for status in ["400 Bad Request", "401 Unauthorized", "429 Too Many Requests", "500 Internal Server Error"] {
+        for body in ["not JSON", r#"{"code":50027,"message":"Invalid Webhook Token"}"#] {
+            let transport = Transport::new(response(status, body));
+            let error = block_on(opened(&transport).finish()).unwrap_err();
+            let expected = status[..3].parse::<u16>().unwrap();
+            assert!(matches!(error, Error::HttpStatus { status, body: actual }
+                if status == expected && actual.as_slice() == body.as_bytes()));
+        }
+    }
+    let transport = Transport::new(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 1\r\n\r\n\xff".to_vec());
+    assert!(matches!(block_on(opened(&transport).finish()),
+        Err(Error::HttpStatus { status: 502, body }) if body.as_slice() == [0xff]));
+
+    let transport = Transport::new(
+        b"HTTP/1.1 429 Too Many Requests\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nslow\r\n0\r\n\r\n".to_vec()
+    );
+    assert!(matches!(block_on(opened(&transport).finish()),
+        Err(Error::HttpStatus { status: 429, body }) if body.as_slice() == b"slow"));
+}
+
+#[test]
+fn response_errors_identify_missing_fields_and_actual_values() {
+    for (body, field) in [
+        ("{}", "id"),
+        (r#"{"id":"x"}"#, "attachments"),
+        (r#"{"id":"x","attachments":[]}"#, "attachments[0]"),
+        (r#"{"id":"x","attachments":[{}]}"#, "attachments[0].url"),
+    ] {
+        let transport = Transport::new(response("200 OK", body));
+        assert!(matches!(block_on(opened(&transport).finish()),
+            Err(Error::InvalidResponse(ResponseError::MissingField { field: actual })) if actual == field));
+    }
+    for (body, field, expected, actual) in [
+        ("null", "$", "object", json!(null)),
+        (r#"{"id":5}"#, "id", "string", json!(5)),
+        (r#"{"id":"x","attachments":null}"#, "attachments", "array", json!(null)),
+        (r#"{"id":"x","attachments":[7]}"#, "attachments[0]", "object", json!(7)),
+        (r#"{"id":"x","attachments":[{"url":7}]}"#, "attachments[0].url", "string", json!(7)),
+    ] {
+        let transport = Transport::new(response("200 OK", body));
+        assert!(matches!(block_on(opened(&transport).finish()),
+            Err(Error::InvalidResponse(ResponseError::InvalidFieldType {
+                field: actual_field, expected: actual_expected, actual: actual_value
+            })) if actual_field == field && actual_expected == expected && actual_value == actual));
+    }
+}
+
+#[test]
+fn body_limits_report_announced_size_for_both_encodings() {
+    for bytes in [
+        b"HTTP/1.1 200 OK\r\nContent-Length: 16385\r\n\r\n".to_vec(),
+        chunked_response(b"4001\r\n"),
+    ] {
+        let transport = Transport::new(bytes);
+        assert!(matches!(block_on(opened(&transport).finish()),
+            Err(Error::HttpParseError(HttpError::BodyTooLarge { limit: 16384, size: 16385 }))));
+    }
+}
+
+#[test]
+fn credentials_distinguish_empty_and_missing_parts_without_exposing_tokens() {
+    for (url, expected) in [
+        ("https://example.com/secret-token", WebhookUrlError::InvalidPrefix),
+        ("https://discord.com/api/webhooks/secret-token", WebhookUrlError::MissingTokenSeparator),
+        ("https://discord.com/api/webhooks//secret-token", WebhookUrlError::EmptyId),
+        ("https://discord.com/api/webhooks/123/", WebhookUrlError::EmptyToken),
+    ] {
+        let error = WebhookCredentials::parse(url).unwrap_err();
+        assert!(!format!("{error:?}: {error}").contains("secret-token"));
+        assert!(matches!(error, Error::InvalidWebhookUrl(actual) if actual == expected));
     }
 }

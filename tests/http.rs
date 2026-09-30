@@ -2,7 +2,7 @@
 
 // The parser is private to the crate. Include it here to test its incremental
 // behavior without changing the public API.
-pub use discord_webhook_storage::{Error, Result};
+pub use discord_webhook_storage::{Error, HttpError, HttpPart, Result};
 #[path = "../src/http.rs"]
 mod http;
 
@@ -107,7 +107,7 @@ fn headers_reject_conflicting_or_invalid_lengths() {
         loop {
             match block_on(headers.next_header()) {
                 Ok(Some(_)) => continue,
-                Err(Error::HttpParseError) => break,
+                Err(Error::HttpParseError(_)) => break,
                 other => panic!("expected invalid content length, got {other:?}"),
             }
         }
@@ -121,7 +121,7 @@ fn headers_reject_missing_colon_and_invalid_utf8() {
         let mut status = HttpStatusParser::new(Cursor::new(bytes));
         block_on(status.status()).unwrap();
         let mut headers = status.into_headers();
-        assert_eq!(block_on(headers.next_header()), Err(Error::HttpParseError));
+        assert!(matches!(block_on(headers.next_header()), Err(Error::HttpParseError(_))));
     }
 }
 
@@ -160,4 +160,116 @@ fn many_headers_compact_consumed_input() {
     }
     assert_eq!(block_on(headers.next_header()).unwrap(), None);
     assert_eq!(block_on(headers.body(4)).unwrap(), b"body");
+}
+
+#[test]
+fn numeric_and_utf8_errors_keep_the_original_causes() {
+    use std::error::Error as _;
+
+    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 nope OK\r\n"));
+    let error = block_on(status.status()).unwrap_err();
+    assert!(error.source().unwrap().source().unwrap().is::<std::num::ParseIntError>());
+    assert!(matches!(error, Error::HttpParseError(HttpError::InvalidStatusCode {
+        value, ..
+    }) if value == "nope"));
+
+    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: nope\r\n"));
+    block_on(status.status()).unwrap();
+    let mut headers = status.into_headers();
+    let error = block_on(headers.next_header()).unwrap_err();
+    assert!(matches!(error, Error::HttpParseError(HttpError::InvalidContentLength {
+        value, ..
+    }) if value == "nope"));
+
+    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200\xff OK\r\n"));
+    let error = block_on(status.status()).unwrap_err();
+    assert!(error.source().unwrap().source().unwrap().is::<std::str::Utf8Error>());
+    assert!(matches!(error, Error::HttpParseError(HttpError::InvalidUtf8 {
+        part: HttpPart::StatusLine, ..
+    })));
+}
+
+#[test]
+fn conflicting_lengths_and_missing_framing_have_separate_errors() {
+    let mut status = HttpStatusParser::new(Cursor::new(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n"
+    ));
+    block_on(status.status()).unwrap();
+    let mut headers = status.into_headers();
+    block_on(headers.next_header()).unwrap();
+    assert!(matches!(block_on(headers.next_header()),
+        Err(Error::HttpParseError(HttpError::ConflictingContentLength { first: 3, second: 4 }))));
+
+    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\n\r\n"));
+    block_on(status.status()).unwrap();
+    let mut headers = status.into_headers();
+    block_on(headers.next_header()).unwrap();
+    assert!(matches!(block_on(headers.body(10)),
+        Err(Error::HttpParseError(HttpError::MissingBodyFraming))));
+}
+
+#[test]
+fn eof_errors_identify_the_response_part() {
+    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200"));
+    assert!(matches!(
+        block_on(status.status()),
+        Err(Error::HttpParseError(HttpError::UnexpectedEof {
+            part: HttpPart::StatusLine,
+        }))
+    ));
+
+    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\nX-Test: value"));
+    block_on(status.status()).unwrap();
+    let mut headers = status.into_headers();
+    assert!(matches!(
+        block_on(headers.next_header()),
+        Err(Error::HttpParseError(HttpError::UnexpectedEof {
+            part: HttpPart::HeaderLine,
+        }))
+    ));
+
+    for (bytes, expected) in [
+        (b"1".as_slice(), HttpPart::ChunkSizeLine),
+        (b"0\r\n", HttpPart::TrailerLine),
+    ] {
+        let mut connection = Cursor::new(bytes);
+        assert!(matches!(
+            block_on(http::read_chunked_body(&mut connection, Vec::new(), 10)),
+            Err(Error::HttpParseError(HttpError::UnexpectedEof { part }))
+                if part == expected
+        ));
+    }
+}
+
+#[test]
+fn invalid_status_and_chunk_syntax_have_dedicated_variants() {
+    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 600 Invalid\r\n"));
+    assert!(matches!(
+        block_on(status.status()),
+        Err(Error::HttpParseError(HttpError::InvalidStatusCode {
+            value,
+            source: None,
+        })) if value == "600"
+    ));
+
+    let mut connection = Cursor::new(b"Z\r\n");
+    assert!(matches!(
+        block_on(http::read_chunked_body(&mut connection, Vec::new(), 10)),
+        Err(Error::HttpParseError(HttpError::InvalidChunkSize {
+            value,
+            source: None,
+        })) if value == "Z"
+    ));
+
+    let mut connection = Cursor::new(b"1\r\nxXX");
+    assert!(matches!(
+        block_on(http::read_chunked_body(&mut connection, Vec::new(), 10)),
+        Err(Error::HttpParseError(HttpError::InvalidChunkDelimiter))
+    ));
+
+    let mut connection = Cursor::new(b"0\r\nBroken-Trailer\r\n\r\n");
+    assert!(matches!(
+        block_on(http::read_chunked_body(&mut connection, Vec::new(), 10)),
+        Err(Error::HttpParseError(HttpError::MalformedTrailer))
+    ));
 }

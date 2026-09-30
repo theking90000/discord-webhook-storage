@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Error::HttpParseError, Result, WebhookCredentials, chunk_writer::ChunkWriter,
+    Error, ResponseError, Result, WebhookCredentials, WriteError, chunk_writer::ChunkWriter,
     http::HttpStatusParser,
 };
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -22,7 +22,10 @@ const MAX_RESPONSE_BODYSIZE: usize = 16384;
 /// An open file upload implementing [`AsyncWrite`].
 ///
 /// Each write sends file bytes in an HTTP chunk. Writes that exceed the remaining
-/// payload allowance fail before sending any bytes from that call.
+/// payload allowance fail before sending any bytes from that call with
+/// [`std::io::ErrorKind::InvalidInput`]. Writes after closing starts return
+/// [`std::io::ErrorKind::BrokenPipe`]. Both retain a typed [`Error::WriteError`]
+/// available through [`std::io::Error::get_ref`].
 /// [`AsyncWriteExt::flush`] drains buffered bytes without finishing the upload.
 /// [`AsyncWriteExt::close`] finishes the request body and keeps the transport open
 /// so that [`Self::finish`] can read the response.
@@ -177,10 +180,10 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
                 if buf_len <= n {
                     Ok(n)
                 } else {
-                    Err(std::io::Error::other("file is not writable"))
+                    Err(WriteError::PayloadLimitExceeded { remaining: n, attempted: buf_len }.into())
                 }
             }
-            _ => Err(std::io::Error::other("file is not writable")),
+            _ => Err(WriteError::NotWritable.into()),
         }
     }
 }
@@ -196,8 +199,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
     ///
     /// Returns [`crate::Error::IoError`] for transport failures and
     /// [`crate::Error::JsonError`] for invalid response JSON.
-    /// [`crate::Error::HttpParseError`] covers malformed HTTP, unsupported framing,
-    /// oversized bodies, statuses other than 200, and missing response fields.
+    /// [`crate::Error::HttpParseError`] details malformed HTTP, unsupported framing,
+    /// and response size limits. [`crate::Error::HttpStatus`] retains unsuccessful
+    /// statuses and their decoded response bodies. [`crate::Error::InvalidResponse`]
+    /// identifies missing or incorrectly typed JSON fields.
     pub async fn finish(mut self) -> Result<WrittenFile> {
         // Send the multipart boundary and final chunk before reading the response.
         self.close().await?;
@@ -211,29 +216,55 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
         let body = parser.body(MAX_RESPONSE_BODYSIZE).await?;
 
         if status != 200 {
-            return Err(HttpParseError);
+            return Err(Error::HttpStatus { status, body });
         }
 
         let json = serde_json::from_slice::<Value>(&body)?;
 
-        let id = json
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or(HttpParseError)?;
-
-        let url = json
-            .get("attachments")
-            .and_then(|v| v.as_array())
-            .and_then(|v| v.first())
-            .and_then(|v| v.get("url"))
-            .and_then(|v| v.as_str())
-            .ok_or(HttpParseError)?;
-
+        if !json.is_object() {
+            return Err(ResponseError::InvalidFieldType {
+                field: "$",
+                expected: "object",
+                actual: json,
+            }.into());
+        }
+        let id = response_field(&json, "id", "id")?;
+        let id = response_string(id, "id")?;
+        let attachments = response_field(&json, "attachments", "attachments")?;
+        let attachments = attachments.as_array().ok_or_else(|| ResponseError::InvalidFieldType {
+            field: "attachments",
+            expected: "array",
+            actual: attachments.clone(),
+        })?;
+        let attachment = attachments.first().ok_or(ResponseError::MissingField {
+            field: "attachments[0]",
+        })?;
+        if !attachment.is_object() {
+            return Err(ResponseError::InvalidFieldType {
+                field: "attachments[0]",
+                expected: "object",
+                actual: attachment.clone(),
+            }.into());
+        }
+        let url = response_field(attachment, "url", "attachments[0].url")?;
+        let url = response_string(url, "attachments[0].url")?;
         Ok(WrittenFile {
             id: id.to_string(),
             url: url.to_string(),
         })
     }
+}
+
+fn response_field<'a>(value: &'a Value, key: &str, field: &'static str) -> Result<&'a Value> {
+    value.get(key).ok_or_else(|| ResponseError::MissingField { field }.into())
+}
+
+fn response_string<'a>(value: &'a Value, field: &'static str) -> Result<&'a str> {
+    value.as_str().ok_or_else(|| ResponseError::InvalidFieldType {
+        field,
+        expected: "string",
+        actual: value.clone(),
+    }.into())
 }
 
 impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
@@ -266,7 +297,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         let this = self.get_mut();
 
         let Some(buf_len) = bufs.iter().try_fold(0usize, |n, buf| n.checked_add(buf.len())) else {
-            return Poll::Ready(Err(std::io::Error::other("file is not writable")));
+            return Poll::Ready(Err(WriteError::SizeOverflow.into()));
         };
         let remaining = match this.remaining_write(buf_len) {
             Ok(n) => n,

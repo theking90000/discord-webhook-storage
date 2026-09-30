@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{Error, Result, WebhookUrlError};
 
 /// A webhook identifier and token borrowed from a Discord webhook URL.
 ///
@@ -16,26 +16,23 @@ impl<'a> WebhookCredentials<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidWebhookUrl`] when the URL lacks the expected
-    /// prefix or the separator between the identifier and token.
+    /// prefix or the separator between the identifier and token, or either
+    /// credential is empty. The error never retains the URL or secret token.
     pub fn parse(url: &'a str) -> Result<WebhookCredentials<'a>> {
-        if !url.starts_with("https://discord.com/api/webhooks/") {
-            return Err(Error::InvalidWebhookUrl);
+        let credentials = url
+            .strip_prefix("https://discord.com/api/webhooks/")
+            .ok_or(WebhookUrlError::InvalidPrefix)?;
+        let (id, token) = credentials
+            .split_once('/')
+            .ok_or(WebhookUrlError::MissingTokenSeparator)?;
+        if id.is_empty() {
+            return Err(WebhookUrlError::EmptyId.into());
+        }
+        if token.is_empty() {
+            return Err(WebhookUrlError::EmptyToken.into());
         }
 
-        let id = match &url[33..].find('/') {
-            Some(i) => *i,
-            None => return Err(Error::InvalidWebhookUrl),
-        };
-
-        if id + 1 == url.len() {
-            // no token, ending with '/'
-            return Err(Error::InvalidWebhookUrl);
-        }
-
-        Ok(WebhookCredentials {
-            id: &url[33..(33 + id)],
-            token: &url[id + 33 + 1..],
-        })
+        Ok(WebhookCredentials { id, token })
     }
 }
 
@@ -48,7 +45,7 @@ impl<'a> TryFrom<&'a str> for WebhookCredentials<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::{Error::InvalidWebhookUrl, WebhookCredentials};
+    use crate::{Error, WebhookCredentials};
 
     #[test]
     fn test_credentials_parsing() {
@@ -57,29 +54,24 @@ mod test {
         let result = WebhookCredentials::parse(test);
 
         assert_eq!(
-            result,
-            Ok(WebhookCredentials {
+            result.unwrap(),
+            WebhookCredentials {
                 id: "webhookid",
                 token: "supertoken"
-            })
+            }
         )
     }
 
     #[test]
     fn test_invalid_url() {
-        assert_eq!(WebhookCredentials::parse(""), Err(InvalidWebhookUrl));
-        assert_eq!(WebhookCredentials::parse("tokenid"), Err(InvalidWebhookUrl));
-        assert_eq!(
-            WebhookCredentials::parse("https://discord.com/api/"),
-            Err(InvalidWebhookUrl)
-        );
-        assert_eq!(
-            WebhookCredentials::parse("https://discord.com/api/webhookid"),
-            Err(InvalidWebhookUrl)
-        );
-        assert_eq!(
-            WebhookCredentials::parse("https://discord.com/api/webhookid/"),
-            Err(InvalidWebhookUrl)
-        );
+        for url in [
+            "",
+            "tokenid",
+            "https://discord.com/api/",
+            "https://discord.com/api/webhookid",
+            "https://discord.com/api/webhookid/",
+        ] {
+            assert!(matches!(WebhookCredentials::parse(url), Err(Error::InvalidWebhookUrl(_))));
+        }
     }
 }

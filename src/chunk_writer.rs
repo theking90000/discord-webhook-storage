@@ -6,6 +6,8 @@ use std::{
 
 use futures::{AsyncRead, AsyncWrite};
 
+use crate::WriteError;
+
 /// Default maximum payload size of a single HTTP chunk.
 ///
 /// This only controls HTTP chunk framing. It has no relation to multipart
@@ -147,9 +149,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
         let this = self.get_mut();
 
         if this.state != State::Writing {
-            return Poll::Ready(Err(io::Error::other(
-                "chunked stream is no longer writable",
-            )));
+            return Poll::Ready(Err(WriteError::NotWritable.into()));
         }
 
         // Finish the previous chunk before accepting another payload.
@@ -181,9 +181,9 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ChunkWriter<T> {
             write!(&mut cursor, "{:X}\r\n", payload_len)?;
             cursor.position() as usize
         };
-        let chunk_len = payload_len.checked_add(header_len + 2).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "chunk size overflows usize")
-        })?;
+        let chunk_len = payload_len
+            .checked_add(header_len + 2)
+            .ok_or_else(|| io::Error::from(WriteError::SizeOverflow))?;
         chunk[0] = IoSlice::new(&header[..header_len]);
         chunk[count] = IoSlice::new(b"\r\n");
 

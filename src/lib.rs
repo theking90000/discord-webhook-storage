@@ -7,5 +7,5 @@ mod http;
 mod write;
 
 pub use credentials::WebhookCredentials;
-pub use error::{Error, Result};
+pub use error::{Error, HttpError, HttpPart, ResponseError, Result, WebhookUrlError, WriteError};
 pub use write::{WriteConfig, WriteFile, WrittenFile};
