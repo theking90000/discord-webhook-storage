@@ -298,9 +298,9 @@ pub(crate) async fn read_chunked_body<T: AsyncRead + Unpin>(
         let name = &trailer[..colon];
         let value = &trailer[colon + 1..];
         if name.is_empty()
-            || !name.iter().all(|&byte| {
-                byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
-            })
+            || !name
+                .iter()
+                .all(|&byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
             || !value
                 .iter()
                 .all(|&byte| byte == b'\t' || (byte >= b' ' && byte != 0x7f))

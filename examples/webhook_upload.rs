@@ -16,8 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let url = std::env::var("DISCORD_WEBHOOK_URL")?;
     let credentials = WebhookCredentials::parse(&url)?;
 
-    let roots =
-        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     let tls = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
@@ -31,12 +30,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let connection = pool.acquire().await?;
 
-    let mut file =
-        WriteFile::open(connection, &credentials, &WriteConfig::default()).await?;
+    let mut file = WriteFile::open(connection, &credentials, &WriteConfig::default()).await?;
 
-    let pattern: Vec<u8> = (0..WRITE_SIZE)
-        .map(|i| (i & 0xff) as u8)
-        .collect();
+    let pattern: Vec<u8> = (0..WRITE_SIZE).map(|i| (i & 0xff) as u8).collect();
 
     let mut remaining = FILE_SIZE;
 
