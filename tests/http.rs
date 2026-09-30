@@ -121,7 +121,10 @@ fn headers_reject_missing_colon_and_invalid_utf8() {
         let mut status = HttpStatusParser::new(Cursor::new(bytes));
         block_on(status.status()).unwrap();
         let mut headers = status.into_headers();
-        assert!(matches!(block_on(headers.next_header()), Err(Error::HttpParseError(_))));
+        assert!(matches!(
+            block_on(headers.next_header()),
+            Err(Error::HttpParseError(_))
+        ));
     }
 }
 
@@ -168,44 +171,74 @@ fn numeric_and_utf8_errors_keep_the_original_causes() {
 
     let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 nope OK\r\n"));
     let error = block_on(status.status()).unwrap_err();
-    assert!(error.source().unwrap().source().unwrap().is::<std::num::ParseIntError>());
-    assert!(matches!(error, Error::HttpParseError(HttpError::InvalidStatusCode {
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .is::<std::num::ParseIntError>()
+    );
+    assert!(
+        matches!(error, Error::HttpParseError(HttpError::InvalidStatusCode {
         value, ..
-    }) if value == "nope"));
+    }) if value == "nope")
+    );
 
-    let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: nope\r\n"));
+    let mut status =
+        HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: nope\r\n"));
     block_on(status.status()).unwrap();
     let mut headers = status.into_headers();
     let error = block_on(headers.next_header()).unwrap_err();
-    assert!(matches!(error, Error::HttpParseError(HttpError::InvalidContentLength {
+    assert!(
+        matches!(error, Error::HttpParseError(HttpError::InvalidContentLength {
         value, ..
-    }) if value == "nope"));
+    }) if value == "nope")
+    );
 
     let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200\xff OK\r\n"));
     let error = block_on(status.status()).unwrap_err();
-    assert!(error.source().unwrap().source().unwrap().is::<std::str::Utf8Error>());
-    assert!(matches!(error, Error::HttpParseError(HttpError::InvalidUtf8 {
-        part: HttpPart::StatusLine, ..
-    })));
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .is::<std::str::Utf8Error>()
+    );
+    assert!(matches!(
+        error,
+        Error::HttpParseError(HttpError::InvalidUtf8 {
+            part: HttpPart::StatusLine,
+            ..
+        })
+    ));
 }
 
 #[test]
 fn conflicting_lengths_and_missing_framing_have_separate_errors() {
     let mut status = HttpStatusParser::new(Cursor::new(
-        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n"
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n",
     ));
     block_on(status.status()).unwrap();
     let mut headers = status.into_headers();
     block_on(headers.next_header()).unwrap();
-    assert!(matches!(block_on(headers.next_header()),
-        Err(Error::HttpParseError(HttpError::ConflictingContentLength { first: 3, second: 4 }))));
+    assert!(matches!(
+        block_on(headers.next_header()),
+        Err(Error::HttpParseError(HttpError::ConflictingContentLength {
+            first: 3,
+            second: 4
+        }))
+    ));
 
     let mut status = HttpStatusParser::new(Cursor::new(b"HTTP/1.1 200 OK\r\n\r\n"));
     block_on(status.status()).unwrap();
     let mut headers = status.into_headers();
     block_on(headers.next_header()).unwrap();
-    assert!(matches!(block_on(headers.body(10)),
-        Err(Error::HttpParseError(HttpError::MissingBodyFraming))));
+    assert!(matches!(
+        block_on(headers.body(10)),
+        Err(Error::HttpParseError(HttpError::MissingBodyFraming))
+    ));
 }
 
 #[test]

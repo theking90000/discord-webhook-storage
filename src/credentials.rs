@@ -71,7 +71,10 @@ mod test {
             "https://discord.com/api/webhookid",
             "https://discord.com/api/webhookid/",
         ] {
-            assert!(matches!(WebhookCredentials::parse(url), Err(Error::InvalidWebhookUrl(_))));
+            assert!(matches!(
+                WebhookCredentials::parse(url),
+                Err(Error::InvalidWebhookUrl(_))
+            ));
         }
     }
 }

@@ -98,20 +98,26 @@ impl<T: AsyncRead + Unpin> HttpStatusParser<T> {
 
         let line = decode_utf8(line, HttpPart::StatusLine)?;
 
-        let rest = line.strip_prefix("HTTP/1.1 ")
+        let rest = line
+            .strip_prefix("HTTP/1.1 ")
             .ok_or(HttpError::UnsupportedHttpVersion)?;
 
-        let (status, _) = rest.split_once(' ')
-            .ok_or(HttpError::MalformedStatusLine)?;
-        let code = status.parse::<u16>().map_err(|source| HttpError::InvalidStatusCode {
-            value: status.to_owned(),
-            source: Some(source),
-        })?;
-        if status.len() != 3 || !status.bytes().all(|b| b.is_ascii_digit()) || !(100..=599).contains(&code) {
+        let (status, _) = rest.split_once(' ').ok_or(HttpError::MalformedStatusLine)?;
+        let code = status
+            .parse::<u16>()
+            .map_err(|source| HttpError::InvalidStatusCode {
+                value: status.to_owned(),
+                source: Some(source),
+            })?;
+        if status.len() != 3
+            || !status.bytes().all(|b| b.is_ascii_digit())
+            || !(100..=599).contains(&code)
+        {
             return Err(HttpError::InvalidStatusCode {
                 value: status.to_owned(),
                 source: None,
-            }.into());
+            }
+            .into());
         }
         Ok(code)
     }
@@ -146,20 +152,25 @@ impl<T: AsyncRead + Unpin> HttpHeaderParser<T> {
             return Ok(None);
         }
 
-        let (name, value) = line.split_once(':')
-            .ok_or(HttpError::MalformedHeader)?;
+        let (name, value) = line.split_once(':').ok_or(HttpError::MalformedHeader)?;
 
         let value = value.trim_ascii();
 
         if name.eq_ignore_ascii_case("content-length") {
-            let len = value.parse::<usize>().map_err(|source| HttpError::InvalidContentLength {
-                value: value.to_owned(),
-                source,
-            })?;
+            let len = value
+                .parse::<usize>()
+                .map_err(|source| HttpError::InvalidContentLength {
+                    value: value.to_owned(),
+                    source,
+                })?;
 
             if let Some(previous) = self.content_length {
                 if previous != len {
-                    return Err(HttpError::ConflictingContentLength { first: previous, second: len }.into());
+                    return Err(HttpError::ConflictingContentLength {
+                        first: previous,
+                        second: len,
+                    }
+                    .into());
                 }
             }
 
@@ -170,7 +181,10 @@ impl<T: AsyncRead + Unpin> HttpHeaderParser<T> {
             // Only plain chunked encoding is supported. Other transfer codings
             // would require additional decoding before parsing the JSON body.
             if self.chunked || !value.eq_ignore_ascii_case("chunked") {
-                return Err(HttpError::UnsupportedTransferEncoding { value: value.to_owned() }.into());
+                return Err(HttpError::UnsupportedTransferEncoding {
+                    value: value.to_owned(),
+                }
+                .into());
             }
             self.chunked = true;
         }
@@ -212,12 +226,20 @@ pub(crate) async fn read_body<T: AsyncRead + Unpin>(
 ) -> Result<Vec<u8>> {
     let body_size = parser.body_size().ok_or(HttpError::MissingBodyFraming)?;
     if body_size > max_size {
-        return Err(HttpError::BodyTooLarge { limit: max_size, size: body_size }.into());
+        return Err(HttpError::BodyTooLarge {
+            limit: max_size,
+            size: body_size,
+        }
+        .into());
     }
 
     let (mut connection, mut body) = parser.remaining();
     if body.len() > body_size {
-        return Err(HttpError::UnexpectedBodyBytes { expected: body_size, received: body.len() }.into());
+        return Err(HttpError::UnexpectedBodyBytes {
+            expected: body_size,
+            received: body.len(),
+        }
+        .into());
     }
     let already_read = body.len();
     body.resize(body_size, 0);
@@ -240,7 +262,11 @@ async fn read_chunk_line<T: AsyncBufRead + Unpin>(
         .read_until(b'\n', line)
         .await?;
     if line.len() > MAX_CHUNK_LINE_SIZE {
-        return Err(HttpError::MetadataTooLarge { part, limit: MAX_CHUNK_LINE_SIZE }.into());
+        return Err(HttpError::MetadataTooLarge {
+            part,
+            limit: MAX_CHUNK_LINE_SIZE,
+        }
+        .into());
     }
     if line.is_empty() || !line.ends_with(b"\n") {
         return Err(HttpError::UnexpectedEof { part }.into());
@@ -281,19 +307,25 @@ pub(crate) async fn read_chunked_body<T: AsyncRead + Unpin>(
             return Err(HttpError::InvalidChunkSize {
                 value: String::from_utf8_lossy(chunk_line).into_owned(),
                 source: None,
-            }.into());
+            }
+            .into());
         }
         let size_text = decode_utf8(size_bytes, HttpPart::ChunkSizeLine)?;
-        let size = usize::from_str_radix(size_text, 16).map_err(|source| HttpError::InvalidChunkSize {
-            value: String::from_utf8_lossy(chunk_line).into_owned(),
-            source: Some(source),
-        })?;
+        let size =
+            usize::from_str_radix(size_text, 16).map_err(|source| HttpError::InvalidChunkSize {
+                value: String::from_utf8_lossy(chunk_line).into_owned(),
+                source: Some(source),
+            })?;
 
         if size == 0 {
             break;
         }
         if size > max_size - body.len() {
-            return Err(HttpError::BodyTooLarge { limit: max_size, size: body.len().saturating_add(size) }.into());
+            return Err(HttpError::BodyTooLarge {
+                limit: max_size,
+                size: body.len().saturating_add(size),
+            }
+            .into());
         }
 
         let start = body.len();
@@ -313,7 +345,11 @@ pub(crate) async fn read_chunked_body<T: AsyncRead + Unpin>(
         read_chunk_line(&mut reader, &mut line, HttpPart::TrailerLine).await?;
         trailers_size += line.len();
         if trailers_size > MAX_TRAILERS_SIZE {
-            return Err(HttpError::MetadataTooLarge { part: HttpPart::Trailers, limit: MAX_TRAILERS_SIZE }.into());
+            return Err(HttpError::MetadataTooLarge {
+                part: HttpPart::Trailers,
+                limit: MAX_TRAILERS_SIZE,
+            }
+            .into());
         }
         if line == b"\r\n" {
             return Ok(body);

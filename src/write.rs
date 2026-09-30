@@ -180,7 +180,11 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
                 if buf_len <= n {
                     Ok(n)
                 } else {
-                    Err(WriteError::PayloadLimitExceeded { remaining: n, attempted: buf_len }.into())
+                    Err(WriteError::PayloadLimitExceeded {
+                        remaining: n,
+                        attempted: buf_len,
+                    }
+                    .into())
                 }
             }
             _ => Err(WriteError::NotWritable.into()),
@@ -226,16 +230,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
                 field: "$",
                 expected: "object",
                 actual: json,
-            }.into());
+            }
+            .into());
         }
         let id = response_field(&json, "id", "id")?;
         let id = response_string(id, "id")?;
         let attachments = response_field(&json, "attachments", "attachments")?;
-        let attachments = attachments.as_array().ok_or_else(|| ResponseError::InvalidFieldType {
-            field: "attachments",
-            expected: "array",
-            actual: attachments.clone(),
-        })?;
+        let attachments =
+            attachments
+                .as_array()
+                .ok_or_else(|| ResponseError::InvalidFieldType {
+                    field: "attachments",
+                    expected: "array",
+                    actual: attachments.clone(),
+                })?;
         let attachment = attachments.first().ok_or(ResponseError::MissingField {
             field: "attachments[0]",
         })?;
@@ -244,7 +252,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
                 field: "attachments[0]",
                 expected: "object",
                 actual: attachment.clone(),
-            }.into());
+            }
+            .into());
         }
         let url = response_field(attachment, "url", "attachments[0].url")?;
         let url = response_string(url, "attachments[0].url")?;
@@ -256,15 +265,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
 }
 
 fn response_field<'a>(value: &'a Value, key: &str, field: &'static str) -> Result<&'a Value> {
-    value.get(key).ok_or_else(|| ResponseError::MissingField { field }.into())
+    value
+        .get(key)
+        .ok_or_else(|| ResponseError::MissingField { field }.into())
 }
 
 fn response_string<'a>(value: &'a Value, field: &'static str) -> Result<&'a str> {
-    value.as_str().ok_or_else(|| ResponseError::InvalidFieldType {
-        field,
-        expected: "string",
-        actual: value.clone(),
-    }.into())
+    value.as_str().ok_or_else(|| {
+        ResponseError::InvalidFieldType {
+            field,
+            expected: "string",
+            actual: value.clone(),
+        }
+        .into()
+    })
 }
 
 impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
@@ -296,7 +310,10 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
-        let Some(buf_len) = bufs.iter().try_fold(0usize, |n, buf| n.checked_add(buf.len())) else {
+        let Some(buf_len) = bufs
+            .iter()
+            .try_fold(0usize, |n, buf| n.checked_add(buf.len()))
+        else {
             return Poll::Ready(Err(WriteError::SizeOverflow.into()));
         };
         let remaining = match this.remaining_write(buf_len) {

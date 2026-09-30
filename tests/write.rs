@@ -8,7 +8,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use discord_webhook_storage::{Error, HttpError, ResponseError, WebhookCredentials, WebhookUrlError, WriteConfig, WriteError, WriteFile};
+use discord_webhook_storage::{
+    Error, HttpError, ResponseError, WebhookCredentials, WebhookUrlError, WriteConfig, WriteError,
+    WriteFile,
+};
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, executor::block_on};
 use serde_json::json;
 
@@ -263,7 +266,10 @@ fn zero_bytes_and_repeated_close_write_one_terminator() {
     assert!(decode_request(&request).1.ends_with(b"--\r\n"));
     assert_eq!(transport.0.borrow().closes, 0);
     assert_eq!(transport.0.borrow().flushes, 1);
-    assert_write_rejection(block_on(file.write(&[1])).unwrap_err(), WriteError::NotWritable);
+    assert_write_rejection(
+        block_on(file.write(&[1])).unwrap_err(),
+        WriteError::NotWritable,
+    );
 }
 
 #[test]
@@ -297,11 +303,13 @@ fn file_limit_applies_to_scalar_and_vectored_writes() {
     let large = vec![7; 19_999_997];
     block_on(file.write_all(&large)).unwrap();
     let before = transport.written().len();
-    let expected = WriteError::PayloadLimitExceeded { remaining: 3, attempted: 4 };
+    let expected = WriteError::PayloadLimitExceeded {
+        remaining: 3,
+        attempted: 4,
+    };
     assert_write_rejection(block_on(file.write(&[1, 2, 3, 4])).unwrap_err(), expected);
     assert_write_rejection(
-        block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3, 4])]))
-            .unwrap_err(),
+        block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3, 4])])).unwrap_err(),
         expected,
     );
     assert_eq!(transport.written().len(), before);
@@ -311,7 +319,10 @@ fn file_limit_applies_to_scalar_and_vectored_writes() {
         3
     );
     let before = transport.written().len();
-    let expected = WriteError::PayloadLimitExceeded { remaining: 0, attempted: 1 };
+    let expected = WriteError::PayloadLimitExceeded {
+        remaining: 0,
+        attempted: 1,
+    };
     assert_write_rejection(block_on(file.write(&[1])).unwrap_err(), expected);
     assert_write_rejection(
         block_on(file.write_vectored(&[IoSlice::new(&[1])])).unwrap_err(),
@@ -331,8 +342,7 @@ fn vectored_writes_preserve_payload_with_partial_transport_writes() {
             state.pending_writes = true;
         }
         assert_eq!(
-            block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3])]))
-                .unwrap(),
+            block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3])])).unwrap(),
             3
         );
         block_on(file.write_all(&[4])).unwrap();
@@ -345,12 +355,16 @@ fn vectored_writes_preserve_payload_with_partial_transport_writes() {
             .find_map(|line| line.strip_prefix("Content-Type: multipart/form-data; boundary="))
             .unwrap();
         let file_header = b"filename=\"file.bin\"\r\n\r\n";
-        let payload_start = body.windows(file_header.len())
-            .position(|window| window == file_header).unwrap() + file_header.len();
+        let payload_start = body
+            .windows(file_header.len())
+            .position(|window| window == file_header)
+            .unwrap()
+            + file_header.len();
         let expected = [
             &[1, 2, 3, 4][..],
             format!("\r\n--{boundary}--\r\n").as_bytes(),
-        ].concat();
+        ]
+        .concat();
         assert_eq!(&body[payload_start..], expected, "max_write={max_write}");
     }
 }
@@ -616,8 +630,16 @@ fn assert_write_rejection(error: io::Error, expected: WriteError) {
 
 #[test]
 fn rejected_status_preserves_code_and_body_without_requiring_json() {
-    for status in ["400 Bad Request", "401 Unauthorized", "429 Too Many Requests", "500 Internal Server Error"] {
-        for body in ["not JSON", r#"{"code":50027,"message":"Invalid Webhook Token"}"#] {
+    for status in [
+        "400 Bad Request",
+        "401 Unauthorized",
+        "429 Too Many Requests",
+        "500 Internal Server Error",
+    ] {
+        for body in [
+            "not JSON",
+            r#"{"code":50027,"message":"Invalid Webhook Token"}"#,
+        ] {
             let transport = Transport::new(response(status, body));
             let error = block_on(opened(&transport).finish()).unwrap_err();
             let expected = status[..3].parse::<u16>().unwrap();
@@ -625,7 +647,8 @@ fn rejected_status_preserves_code_and_body_without_requiring_json() {
                 if status == expected && actual.as_slice() == body.as_bytes()));
         }
     }
-    let transport = Transport::new(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 1\r\n\r\n\xff".to_vec());
+    let transport =
+        Transport::new(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 1\r\n\r\n\xff".to_vec());
     assert!(matches!(block_on(opened(&transport).finish()),
         Err(Error::HttpStatus { status: 502, body }) if body.as_slice() == [0xff]));
 
@@ -651,9 +674,24 @@ fn response_errors_identify_missing_fields_and_actual_values() {
     for (body, field, expected, actual) in [
         ("null", "$", "object", json!(null)),
         (r#"{"id":5}"#, "id", "string", json!(5)),
-        (r#"{"id":"x","attachments":null}"#, "attachments", "array", json!(null)),
-        (r#"{"id":"x","attachments":[7]}"#, "attachments[0]", "object", json!(7)),
-        (r#"{"id":"x","attachments":[{"url":7}]}"#, "attachments[0].url", "string", json!(7)),
+        (
+            r#"{"id":"x","attachments":null}"#,
+            "attachments",
+            "array",
+            json!(null),
+        ),
+        (
+            r#"{"id":"x","attachments":[7]}"#,
+            "attachments[0]",
+            "object",
+            json!(7),
+        ),
+        (
+            r#"{"id":"x","attachments":[{"url":7}]}"#,
+            "attachments[0].url",
+            "string",
+            json!(7),
+        ),
     ] {
         let transport = Transport::new(response("200 OK", body));
         assert!(matches!(block_on(opened(&transport).finish()),
@@ -670,18 +708,35 @@ fn body_limits_report_announced_size_for_both_encodings() {
         chunked_response(b"4001\r\n"),
     ] {
         let transport = Transport::new(bytes);
-        assert!(matches!(block_on(opened(&transport).finish()),
-            Err(Error::HttpParseError(HttpError::BodyTooLarge { limit: 16384, size: 16385 }))));
+        assert!(matches!(
+            block_on(opened(&transport).finish()),
+            Err(Error::HttpParseError(HttpError::BodyTooLarge {
+                limit: 16384,
+                size: 16385
+            }))
+        ));
     }
 }
 
 #[test]
 fn credentials_distinguish_empty_and_missing_parts_without_exposing_tokens() {
     for (url, expected) in [
-        ("https://example.com/secret-token", WebhookUrlError::InvalidPrefix),
-        ("https://discord.com/api/webhooks/secret-token", WebhookUrlError::MissingTokenSeparator),
-        ("https://discord.com/api/webhooks//secret-token", WebhookUrlError::EmptyId),
-        ("https://discord.com/api/webhooks/123/", WebhookUrlError::EmptyToken),
+        (
+            "https://example.com/secret-token",
+            WebhookUrlError::InvalidPrefix,
+        ),
+        (
+            "https://discord.com/api/webhooks/secret-token",
+            WebhookUrlError::MissingTokenSeparator,
+        ),
+        (
+            "https://discord.com/api/webhooks//secret-token",
+            WebhookUrlError::EmptyId,
+        ),
+        (
+            "https://discord.com/api/webhooks/123/",
+            WebhookUrlError::EmptyToken,
+        ),
     ] {
         let error = WebhookCredentials::parse(url).unwrap_err();
         assert!(!format!("{error:?}: {error}").contains("secret-token"));

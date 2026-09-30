@@ -18,8 +18,14 @@ fn io_conversion_keeps_os_code_kind_and_source() {
 
 #[test]
 fn io_conversion_keeps_custom_error_details() {
-    let error = Error::from(io::Error::new(io::ErrorKind::ConnectionReset, "peer reset during upload"));
-    assert_eq!(error.source().unwrap().to_string(), "peer reset during upload");
+    let error = Error::from(io::Error::new(
+        io::ErrorKind::ConnectionReset,
+        "peer reset during upload",
+    ));
+    assert_eq!(
+        error.source().unwrap().to_string(),
+        "peer reset during upload"
+    );
     assert!(error.to_string().contains("peer reset during upload"));
 }
 
@@ -30,7 +36,11 @@ fn json_conversion_keeps_location_and_category() {
     let column = original.column();
     let category = original.classify();
     let error = Error::from(original);
-    let source = error.source().unwrap().downcast_ref::<serde_json::Error>().unwrap();
+    let source = error
+        .source()
+        .unwrap()
+        .downcast_ref::<serde_json::Error>()
+        .unwrap();
     assert_eq!(source.line(), line);
     assert_eq!(source.column(), column);
     assert_eq!(source.classify(), category);

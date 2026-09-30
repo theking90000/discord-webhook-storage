@@ -203,7 +203,9 @@ impl fmt::Display for Error {
             Self::IoError(error) => write!(f, "transport I/O failed: {error}"),
             Self::JsonError(error) => write!(f, "JSON encoding or decoding failed: {error}"),
             Self::HttpParseError(error) => write!(f, "invalid HTTP response: {error}"),
-            Self::HttpStatus { status, .. } => write!(f, "Discord rejected the upload with HTTP status {status}"),
+            Self::HttpStatus { status, .. } => {
+                write!(f, "Discord rejected the upload with HTTP status {status}")
+            }
             Self::InvalidResponse(error) => write!(f, "invalid upload response: {error}"),
             Self::WriteError(error) => write!(f, "write rejected: {error}"),
         }
@@ -239,33 +241,61 @@ impl fmt::Display for HttpError {
             Self::UnexpectedEof { part } => write!(f, "unexpected EOF while reading {part}"),
             Self::InvalidUtf8 { part, source } => write!(f, "invalid UTF-8 in {part}: {source}"),
             Self::UnsupportedHttpVersion => f.write_str("expected HTTP/1.1 response version"),
-            Self::MalformedStatusLine => f.write_str("missing separator between status code and reason phrase"),
+            Self::MalformedStatusLine => {
+                f.write_str("missing separator between status code and reason phrase")
+            }
             Self::InvalidStatusCode { value, source } => {
-                write!(f, "invalid status code {value:?}: expected three digits between 100 and 599")?;
+                write!(
+                    f,
+                    "invalid status code {value:?}: expected three digits between 100 and 599"
+                )?;
                 if let Some(source) = source {
                     write!(f, ": {source}")?;
                 }
                 Ok(())
             }
-            Self::InvalidContentLength { value, source } => write!(f, "invalid Content-Length {value:?}: {source}"),
+            Self::InvalidContentLength { value, source } => {
+                write!(f, "invalid Content-Length {value:?}: {source}")
+            }
             Self::MalformedHeader => f.write_str("header line is missing a colon separator"),
-            Self::ConflictingContentLength { first, second } => write!(f, "conflicting Content-Length values: {first} and {second}"),
-            Self::ConflictingBodyFraming => f.write_str("both Content-Length and Transfer-Encoding are present"),
-            Self::UnsupportedTransferEncoding { value } => write!(f, "unsupported or repeated Transfer-Encoding: {value:?}"),
-            Self::MissingBodyFraming => f.write_str("missing Content-Length or chunked transfer encoding"),
+            Self::ConflictingContentLength { first, second } => {
+                write!(f, "conflicting Content-Length values: {first} and {second}")
+            }
+            Self::ConflictingBodyFraming => {
+                f.write_str("both Content-Length and Transfer-Encoding are present")
+            }
+            Self::UnsupportedTransferEncoding { value } => {
+                write!(f, "unsupported or repeated Transfer-Encoding: {value:?}")
+            }
+            Self::MissingBodyFraming => {
+                f.write_str("missing Content-Length or chunked transfer encoding")
+            }
             Self::InvalidChunkSize { value, source } => {
-                write!(f, "invalid chunk size line {value:?}: expected at most 16 hexadecimal digits and optional extensions within usize range")?;
+                write!(
+                    f,
+                    "invalid chunk size line {value:?}: expected at most 16 hexadecimal digits and optional extensions within usize range"
+                )?;
                 if let Some(source) = source {
                     write!(f, ": {source}")?;
                 }
                 Ok(())
             }
             Self::InvalidChunkDelimiter => f.write_str("expected CRLF after chunk data"),
-            Self::MalformedTrailer => f.write_str("trailer is missing a colon or has an invalid name or value"),
+            Self::MalformedTrailer => {
+                f.write_str("trailer is missing a colon or has an invalid name or value")
+            }
             Self::InvalidLineEnding { part } => write!(f, "expected CRLF at the end of {part}"),
-            Self::BodyTooLarge { limit, size } => write!(f, "response body size {size} exceeds the {limit}-byte limit"),
-            Self::UnexpectedBodyBytes { expected, received } => write!(f, "received {received} body bytes for Content-Length {expected}"),
-            Self::MetadataTooLarge { part, limit } => write!(f, "{part} exceeds the {limit}-byte limit"),
+            Self::BodyTooLarge { limit, size } => write!(
+                f,
+                "response body size {size} exceeds the {limit}-byte limit"
+            ),
+            Self::UnexpectedBodyBytes { expected, received } => write!(
+                f,
+                "received {received} body bytes for Content-Length {expected}"
+            ),
+            Self::MetadataTooLarge { part, limit } => {
+                write!(f, "{part} exceeds the {limit}-byte limit")
+            }
         }
     }
 }
@@ -274,7 +304,9 @@ impl fmt::Display for ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingField { field } => write!(f, "missing field {field}"),
-            Self::InvalidFieldType { field, expected, .. } => write!(f, "field {field} must be a JSON {expected}"),
+            Self::InvalidFieldType {
+                field, expected, ..
+            } => write!(f, "field {field} must be a JSON {expected}"),
         }
     }
 }
@@ -282,7 +314,13 @@ impl fmt::Display for ResponseError {
 impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PayloadLimitExceeded { remaining, attempted } => write!(f, "attempted to write {attempted} bytes with {remaining} payload bytes remaining"),
+            Self::PayloadLimitExceeded {
+                remaining,
+                attempted,
+            } => write!(
+                f,
+                "attempted to write {attempted} bytes with {remaining} payload bytes remaining"
+            ),
             Self::NotWritable => f.write_str("request body is closing or already closed"),
             Self::SizeOverflow => f.write_str("combined vectored write size overflows usize"),
         }
@@ -329,7 +367,9 @@ impl From<WriteError> for io::Error {
     fn from(error: WriteError) -> Self {
         let kind = match error {
             WriteError::NotWritable => io::ErrorKind::BrokenPipe,
-            WriteError::PayloadLimitExceeded { .. } | WriteError::SizeOverflow => io::ErrorKind::InvalidInput,
+            WriteError::PayloadLimitExceeded { .. } | WriteError::SizeOverflow => {
+                io::ErrorKind::InvalidInput
+            }
         };
         Self::new(kind, Error::WriteError(error))
     }
@@ -355,7 +395,9 @@ impl std::error::Error for HttpError {
             Self::InvalidUtf8 { source, .. } => Some(source),
             Self::InvalidContentLength { source, .. } => Some(source),
             Self::InvalidStatusCode { source, .. } | Self::InvalidChunkSize { source, .. } => {
-                source.as_ref().map(|source| source as &(dyn std::error::Error + 'static))
+                source
+                    .as_ref()
+                    .map(|source| source as &(dyn std::error::Error + 'static))
             }
             _ => None,
         }
