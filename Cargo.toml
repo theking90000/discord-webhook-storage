@@ -43,6 +43,10 @@ webpki-roots = "1.0"
 name = "webhook_upload"
 required-features = ["tokio-tcp-pool"]
 
+[[example]]
+name = "webhook_upload_download"
+required-features = ["tokio-tcp-pool"]
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
