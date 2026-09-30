@@ -1,13 +1,11 @@
-# Discord webhook storage
+# discord-webhook-storage
 
-Upload files through Discord webhooks, save their references, and read them
-back with an asynchronous file API. Stream file contents with the standard
-`futures::AsyncWrite` and `futures::AsyncRead` operations, read selected byte
-ranges, and renew download URLs when needed.
+Use Discord as file storage from Rust. Upload a file through a webhook, keep the
+reference it gives you, and stream it back later, whole or by byte range.
 
-Uploads and individual renewals use webhook credentials. Renewing many URLs
-together requires a bot token and is more efficient, with up to 50 URLs renewed
-per request.
+Everything goes through the standard `futures::AsyncWrite` / `AsyncRead`
+traits, so uploading looks like writing to a file and downloading looks like
+reading from one.
 
 ## Installation
 
@@ -17,11 +15,12 @@ discord-webhook-storage = "0.1.0"
 futures = "0.3"
 ```
 
-## Writing a file
+## Quick start
 
-Open a `WriteFile`, write its contents, then call `finish()` to obtain the
-`DiscordFile` reference. The credentials select the webhook's destination
-channel.
+### Upload a file
+
+Open a `WriteFile`, write to it, then call `finish()`. That last call is what
+gives you a `DiscordFile`, the reference you'll use to get the file back.
 
 ```rust,no_run
 use discord_webhook_storage::{DiscordFile, Result, WebhookCredentials, WriteConfig, WriteFile};
@@ -39,30 +38,19 @@ where
 }
 ```
 
-Only a successful `finish()` confirms that Discord stored the file. Dropping
-the writer does not complete the upload. `flush()` sends pending bytes;
-`close()` ends writing, but `finish()` is still required to obtain the reference.
+The file lands in the channel the webhook points to.
 
-`WriteConfig::default()` names the file `file.bin` and limits its size to
-20,000,000 bytes. These settings cannot currently be customized. A write that
-would exceed the limit fails without accepting bytes from that call. Discord
-may enforce a different maximum.
+> **Always call `finish()`.** It's the only confirmation that Discord stored the
+> file. Dropping the writer, or calling `close()`, does not complete the upload.
+> (`flush()` just sends the bytes written so far.)
 
-## Keeping a file reference
+**Size limit:** files are named `file.bin` and capped at 20,000,000 bytes.
+These defaults can't be changed yet. A write that would go over the cap fails
+without consuming any of its bytes. Discord may enforce its own, different maximum.
 
-`DiscordFile` contains a message identifier and a `DiscordFileUrl`. Save the
-reference with Serde, or call `to_string()` to obtain a `discord://<id>/<url>`
-string that `DiscordFile::parse()` can read back.
+### Download it back
 
-Download URLs expire. `file.is_valid()` checks the URL's expiration using the
-local clock; it does not check whether the file still exists on Discord.
-Saving a reference does not extend the URL's validity. Renewal updates its URL
-so the same reference can be used for another download.
-
-## Reading a file
-
-Open a `ReadFile` with the saved reference, then use the usual asynchronous
-read operations. `ReadFile::open()` accepts a `DiscordFile` or a `DiscordFileUrl`.
+Pass the reference to `ReadFile::open()` and read as usual.
 
 ```rust,no_run
 use discord_webhook_storage::{DiscordFile, ReadFile, Result};
@@ -79,29 +67,43 @@ where
 }
 ```
 
-For part of a file, use
-`ReadFile::open_with_range(connection, &file, start, Some(end))`. Offsets start
-at zero, and `end` is inclusive and must be greater than `start`. Passing `None`
-reads from `start` to the end of the file.
+To read only part of a file:
 
-Renew an expired URL before opening it for reading. An interrupted download
-returns an error.
+```rust,ignore
+ReadFile::open_with_range(connection, &file, start, Some(end)).await?
+```
 
-## Renewing download URLs
+Offsets start at 0 and `end` is inclusive (and must be greater than `start`).
+Use `None` as the end to read until the end of the file.
 
-Both renewal methods update URLs in place and accept URLs that have already
-expired or are still valid.
+If a download is interrupted, you get an error rather than truncated data.
 
-| Operation | Credentials | URLs per request |
-| --- | --- | --- |
-| `DiscordFile::renew()` | The webhook that created the file's message | One |
-| `renew_urls()` | A bot token through `BotCredentials` | Up to 50 |
+## Saving references
 
-### One file with webhook credentials
+A `DiscordFile` is a message ID plus a download URL. You can store it two ways:
 
-Use `file.renew()` to keep an individual file reference usable with the same
-webhook credentials used for its upload. Credentials for another webhook cause
-an HTTP error. A failed renewal leaves that file reference unchanged.
+- **With Serde**, like any other struct.
+- **As a string**: `file.to_string()` gives `discord://<id>/<url>`, and
+  `DiscordFile::parse()` reads it back.
+
+## Download URLs expire
+
+Discord download URLs don't last forever, and saving a reference doesn't extend
+them. Two things to know:
+
+- `file.is_valid()` tells you whether the URL is still within its expiry date,
+  based on your local clock. It does **not** check that the file still exists on Discord.
+- If the URL has expired, **renew it before opening the file**. Renewing updates
+  the URL inside your reference, so you can keep using the same one.
+
+Renewal works on URLs that are expired or still valid. Pick the method that fits:
+
+| You want to renew | Method | Credentials | URLs per request |
+| --- | --- | --- | --- |
+| One file | `DiscordFile::renew()` | The webhook that uploaded it | 1 |
+| Many files | `renew_urls()` | A bot token (`BotCredentials`) | Up to 50 |
+
+### One file, with the webhook
 
 ```rust,no_run
 use discord_webhook_storage::{DiscordFile, Result, WebhookCredentials};
@@ -119,12 +121,13 @@ where
 }
 ```
 
-### Multiple files with a bot token
+Use the same webhook that created the file. Another webhook returns an HTTP
+error. If renewal fails, the reference is left untouched.
 
-Use `renew_urls()` for collections of files. A bot token is required for this
-method. Renewing up to 50 URLs together takes one request instead of one request
-per file, reducing round trips and the number of requests charged against the
-renewal rate limit.
+### Many files, with a bot token
+
+If you have a collection of files, prefer `renew_urls()`: one request covers up
+to 50 URLs, which means fewer round trips and far less pressure on the rate limit.
 
 ```rust,no_run
 use discord_webhook_storage::{BotCredentials, DiscordFile, Result, renew_urls};
@@ -148,92 +151,85 @@ where
 }
 ```
 
-For a collection of `DiscordFileUrl` values, pass `&mut urls` directly. Mutable
-vectors, slices, arrays, and iterators are accepted. The function handles larger
-collections with multiple requests and updates every repeated URL. Empty input
-does nothing. If renewal fails partway through a collection, earlier successful
-updates remain in place.
+- If you hold `DiscordFileUrl` values directly, pass `&mut urls`. Mutable
+  vectors, slices, arrays and iterators all work.
+- Collections larger than 50 are split into several requests automatically.
+- Duplicate URLs are all updated.
+- Empty input does nothing.
+- If a failure happens midway, the URLs already renewed stay renewed.
 
 ## Rate limits and errors
 
-Indicative request budgets for planning uploads and renewals:
+The library **doesn't schedule or retry requests for you**, so plan your
+throughput with these approximate budgets:
 
-| Scope | Bucket capacity | Refill rate |
+| Scope | Burst capacity | Sustained rate |
 | --- | --- | --- |
-| Webhook requests with `WebhookCredentials` | 5 requests | 2.5 requests/s |
-| Uploads to the same channel, shared across webhooks | 30 requests | 0.5 requests/s |
-| Grouped renewal with `BotCredentials` | 10 requests | 5 requests/s |
+| Webhook requests (`WebhookCredentials`) | 5 requests | 2.5 / s |
+| Uploads to one channel (shared by all its webhooks) | 30 requests | 0.5 / s |
+| Grouped renewal (`BotCredentials`) | 10 requests | 5 / s |
 
-Bucket capacity describes the available burst; refill rate describes the
-sustained request budget. Uploads must respect both the webhook and shared
-channel budgets. Grouped renewal counts requests, not individual URLs, so
-renewing several files together makes better use of the available budget.
+Uploads have to fit within both the webhook budget and the channel budget.
+Grouped renewal is counted per request, not per URL, which is why renewing in
+batches goes a long way.
 
-The library does not schedule requests or retry failures automatically.
-`Error::HttpStatus { status, body }` preserves Discord's HTTP status and error
-response. On status `429`, wait for the response body's `retry_after` duration
-before retrying. Discord's limits can change, so these figures are planning
-estimates rather than guarantees. See
-[Discord's rate limit documentation](https://docs.discord.com/developers/topics/rate-limits).
+These numbers are estimates: Discord can change its limits at any time (see
+[their documentation](https://docs.discord.com/developers/topics/rate-limits)).
 
-Other errors distinguish connection failures, invalid file references, and
-unusable responses. Discard a retained connection after an error or interrupted
-operation.
+When Discord rejects a request you get `Error::HttpStatus { status, body }`,
+with the original status and error response. On `429`, wait for the
+`retry_after` duration in the body, then try again. Other errors cover
+connection failures, invalid file references and unusable responses.
 
-## Connections
+After any error or interrupted operation, **throw away the connection** and open a new one.
 
-Supply an already connected TLS connection using HTTP/1.1:
+## Bringing your own connection
 
-| Operation | Destination |
+The library doesn't open connections itself. You give it an already established
+**TLS, HTTP/1.1** connection that implements `futures::AsyncRead`,
+`futures::AsyncWrite` and `Unpin`:
+
+| Operation | Connect to |
 | --- | --- |
-| Upload or renew URLs | `discord.com:443` |
-| Download files | `cdn.discordapp.com:443` |
+| Upload, renew URLs | `discord.com:443` |
+| Download | `cdn.discordapp.com:443` |
 
-Connections must implement `futures::AsyncRead`, `futures::AsyncWrite`, and
-`Unpin`. Pass `&mut connection` to keep ownership. After successful upload or
-renewal, reuse it only if it is still open. For downloads, read to the end and
-drop the reader before reusing the connection.
+Pass `&mut connection` if you want to keep ownership. To reuse a connection:
 
-## Runnable demos
+- **After an upload or renewal**: reuse it if it's still open.
+- **After a download**: read to the end and drop the reader first.
 
-The demos set up TLS with the optional `tokio-tcp-pool` feature. The library
-also accepts other connections that meet the requirements above. Uploaded files
-remain in the webhook's channel after a demo.
+## Try it
 
-Upload generated data:
+The examples use the optional `tokio-tcp-pool` feature, which sets up TLS for
+you. Files uploaded by the demos stay in the webhook's channel.
 
 ```sh
+# Upload generated data
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
     cargo run --example webhook_upload --features tokio-tcp-pool
-```
 
-Upload a file, read a byte range, and verify its contents:
-
-```sh
+# Upload a file, read a byte range, verify the contents
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
     cargo run --example webhook_upload_download --features tokio-tcp-pool
-```
 
-Upload a file and renew its URL with the same webhook:
-
-```sh
+# Upload a file and renew its URL with the same webhook
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
     cargo run --example webhook_upload_renew --features tokio-tcp-pool
-```
 
-Upload four 1 MB files concurrently, wait three seconds, renew all four URLs
-with a bot token in one request, then download and verify all four files:
-
-```sh
+# Upload four 1 MB files in parallel, wait 3 s, renew all four URLs with a bot
+# token in a single request, then download and verify them
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
 DISCORD_BOT_TOKEN='<bot-token>' \
     cargo run --example webhook_parallel_upload_renew_download --features tokio-tcp-pool
 ```
 
-## Documentation
+## API docs
 
 ```sh
 cargo doc --all-features --no-deps --open
 ```
 
-MIT licensed.
+## License
+
+MIT
