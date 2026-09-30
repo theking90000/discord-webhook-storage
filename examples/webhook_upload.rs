@@ -28,9 +28,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .tls(Arc::new(tls))
     .build()?;
 
-    let connection = pool.acquire().await?;
+    let mut connection = pool.acquire().await?;
 
-    let mut file = WriteFile::open(connection, &credentials, &WriteConfig::default()).await?;
+    let mut file = WriteFile::open(&mut connection, &credentials, &WriteConfig::default()).await?;
 
     let pattern: Vec<u8> = (0..WRITE_SIZE).map(|i| (i & 0xff) as u8).collect();
 

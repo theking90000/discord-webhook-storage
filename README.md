@@ -29,20 +29,33 @@ the upload has been sent even if `finish()` is never called; its ID and URL are
 simply not retrieved, and Discord's response is not checked. Dropping a writer
 without closing it does not complete the upload.
 
-The caller establishes a TLS connection to `discord.com:443` and supplies a
-transport implementing `futures::AsyncRead`, `futures::AsyncWrite`, and `Unpin`.
+`connection` must already be connected to `discord.com:443` over TCP, with the
+TLS handshake complete. The caller supplies this transport, which must implement
+`futures::AsyncRead`, `futures::AsyncWrite`, and `Unpin`.
+
+Uploads use HTTP/1.1 keep-alive. Neither `close()` nor `finish()` explicitly closes
+the underlying connection. Pass `&mut connection` to `open()`, as below, to borrow
+the connection. `finish()` consumes the writer and releases the borrow, while
+the caller retains ownership of the connection. Passing an owned connection
+instead moves it into the writer and drops it with the writer.
+
+Only reuse the connection after `finish()` returns `Ok`, which means the complete
+response has been read, and provided Discord keeps the connection open.
+`close()` alone leaves the response unread. If `finish()` returns an error,
+including `IoError`, discard the connection; the request or response may be
+incomplete, so reuse is not guaranteed.
 
 ```rust,no_run
 use discord_webhook_storage::{Result, WebhookCredentials, WriteConfig, WriteFile};
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-async fn upload<T>(connection: T, webhook_url: &str) -> Result<()>
+async fn upload<T>(mut connection: T, webhook_url: &str) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let credentials = WebhookCredentials::parse(webhook_url)?;
     let mut file = WriteFile::open(
-        connection,
+        &mut connection,
         &credentials,
         &WriteConfig::default(),
     )

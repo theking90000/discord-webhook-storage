@@ -161,9 +161,9 @@ fn response(status: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn opened(transport: &Transport) -> WriteFile<Transport> {
+fn opened(transport: &mut Transport) -> WriteFile<&mut Transport> {
     block_on(WriteFile::open(
-        transport.clone(),
+        transport,
         &credentials(),
         &WriteConfig::default(),
     ))
@@ -217,7 +217,8 @@ fn credentials_accept_url_and_try_from() {
 #[test]
 fn open_writes_multipart_request_and_file_bytes() {
     let transport = Transport::new(Vec::new());
-    let mut file = opened(&transport);
+    let mut connection = transport.clone();
+    let mut file = opened(&mut connection);
     block_on(async {
         file.write_all(&[0, 2, 3, 255]).await.unwrap();
         file.close().await.unwrap();
@@ -257,7 +258,8 @@ fn open_writes_multipart_request_and_file_bytes() {
 #[test]
 fn zero_bytes_and_repeated_close_write_one_terminator() {
     let transport = Transport::new(Vec::new());
-    let mut file = opened(&transport);
+    let mut connection = transport.clone();
+    let mut file = opened(&mut connection);
     block_on(async {
         file.close().await.unwrap();
         file.close().await.unwrap();
@@ -275,7 +277,8 @@ fn zero_bytes_and_repeated_close_write_one_terminator() {
 #[test]
 fn close_handles_partial_transport_writes() {
     let transport = Transport::new(Vec::new());
-    let mut file = opened(&transport);
+    let mut connection = transport.clone();
+    let mut file = opened(&mut connection);
     transport.0.borrow_mut().max_write = 3;
     block_on(file.close()).unwrap();
     assert!(decode_request(&transport.written()).1.ends_with(b"--\r\n"));
@@ -286,7 +289,8 @@ fn close_handles_partial_transport_writes() {
 fn open_retries_partial_transport_writes() {
     let transport = Transport::new(Vec::new());
     transport.0.borrow_mut().max_write = 3;
-    let mut file = opened(&transport);
+    let mut connection = transport.clone();
+    let mut file = opened(&mut connection);
     block_on(file.close()).unwrap();
     let request = transport.written();
     let (headers, body) = decode_request(&request);
@@ -299,7 +303,8 @@ fn open_retries_partial_transport_writes() {
 #[test]
 fn file_limit_applies_to_scalar_and_vectored_writes() {
     let transport = Transport::new(Vec::new());
-    let mut file = opened(&transport);
+    let mut connection = transport.clone();
+    let mut file = opened(&mut connection);
     let large = vec![7; 19_999_997];
     block_on(file.write_all(&large)).unwrap();
     let before = transport.written().len();
@@ -335,7 +340,8 @@ fn file_limit_applies_to_scalar_and_vectored_writes() {
 fn vectored_writes_preserve_payload_with_partial_transport_writes() {
     for max_write in [1, 3, 4, 6, usize::MAX] {
         let transport = Transport::new(Vec::new());
-        let mut file = opened(&transport);
+        let mut connection = transport.clone();
+        let mut file = opened(&mut connection);
         {
             let mut state = transport.0.borrow_mut();
             state.max_write = max_write;
@@ -375,7 +381,7 @@ fn flush_and_transport_errors_are_reported() {
     transport.0.borrow_mut().fail_write = true;
     assert!(matches!(
         block_on(WriteFile::open(
-            transport,
+            &mut transport.clone(),
             &credentials(),
             &WriteConfig::default()
         )),
@@ -383,16 +389,45 @@ fn flush_and_transport_errors_are_reported() {
     ));
 
     let transport = Transport::new(Vec::new());
-    let mut file = opened(&transport);
+    let mut connection = transport.clone();
+    let mut file = opened(&mut connection);
     transport.0.borrow_mut().fail_write = true;
     assert!(block_on(file.write(&[1])).is_err());
     assert!(block_on(file.close()).is_err());
 
     let transport = Transport::new(Vec::new());
-    let mut file = opened(&transport);
+    let mut connection = transport.clone();
+    let mut file = opened(&mut connection);
     transport.0.borrow_mut().fail_flush = true;
     assert!(block_on(file.flush()).is_err());
     assert!(block_on(file.close()).is_err());
+}
+
+#[test]
+fn finish_releases_connection_for_another_upload() {
+    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.example/file"}]}"#;
+    let mut transport = Transport::new(response("200 OK", body));
+    transport.0.borrow_mut().require_complete_request = true;
+
+    for payload in [b"first".as_slice(), b"second".as_slice()] {
+        let mut file = opened(&mut transport);
+        block_on(file.write_all(payload)).unwrap();
+        let result = block_on(file.finish()).unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({"id":"message-1","url":"https://cdn.example/file"})
+        );
+        let request = transport.written();
+        let (_, multipart) = decode_request(&request);
+        assert!(multipart.windows(payload.len()).any(|bytes| bytes == payload));
+
+        let mut state = transport.0.borrow_mut();
+        assert_eq!(state.read_at, state.response.len());
+        assert_eq!(state.closes, 0);
+        state.response = response("200 OK", body);
+        state.read_at = 0;
+        state.written.clear();
+    }
 }
 
 #[test]
@@ -401,7 +436,8 @@ fn finish_reads_fragmented_success_response() {
     for read_size in [1, 7, 1024] {
         let transport = Transport::new(response("200 OK", body));
         transport.0.borrow_mut().max_read = read_size;
-        let file = opened(&transport);
+        let mut connection = transport.clone();
+        let file = opened(&mut connection);
         let result = block_on(file.finish()).unwrap();
         assert_eq!(
             serde_json::to_value(result).unwrap(),
@@ -421,7 +457,8 @@ fn finish_completes_request_before_reading_response() {
             state.pending_writes = true;
             state.require_complete_request = true;
         }
-        let mut file = opened(&transport);
+        let mut connection = transport.clone();
+        let mut file = opened(&mut connection);
         block_on(file.write_all(&[0, 2, 3, 255])).unwrap();
         block_on(file.finish()).unwrap();
         decode_request(&transport.written());
@@ -445,7 +482,7 @@ fn finish_rejects_http_status_and_header_errors() {
     for bytes in cases {
         let transport = Transport::new(bytes);
         assert!(matches!(
-            block_on(opened(&transport).finish()),
+            block_on(opened(&mut transport.clone()).finish()),
             Err(Error::HttpParseError(_))
         ));
     }
@@ -462,7 +499,7 @@ fn finish_rejects_invalid_json_and_missing_fields() {
         r#"{"id":"x","attachments":[{"url":7}]}"#,
     ] {
         let transport = Transport::new(response("200 OK", body));
-        let error = block_on(opened(&transport).finish()).err().unwrap();
+        let error = block_on(opened(&mut transport.clone()).finish()).err().unwrap();
         if body == "not json" {
             assert!(matches!(error, Error::JsonError(_)));
         } else {
@@ -476,13 +513,13 @@ fn finish_reports_read_failures_and_truncated_body() {
     let transport = Transport::new(Vec::new());
     transport.0.borrow_mut().fail_read = true;
     assert!(matches!(
-        block_on(opened(&transport).finish()),
+        block_on(opened(&mut transport.clone()).finish()),
         Err(Error::IoError(error)) if error.to_string() == "read failed"
     ));
 
     let transport = Transport::new(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n{}".to_vec());
     assert!(matches!(
-        block_on(opened(&transport).finish()),
+        block_on(opened(&mut transport.clone()).finish()),
         Err(Error::IoError(error)) if error.kind() == io::ErrorKind::UnexpectedEof
     ));
 }
@@ -517,7 +554,7 @@ fn finish_decodes_fragmented_chunks_extensions_and_trailers_without_eof() {
                 state.pending_reads = true;
                 state.error_on_eof = true;
             }
-            let result = block_on(opened(&transport).finish()).unwrap();
+            let result = block_on(opened(&mut transport.clone()).finish()).unwrap();
             assert_eq!(
                 serde_json::to_value(result).unwrap(),
                 json!({"id":"message-1","url":"https://cdn.example/file"})
@@ -534,14 +571,14 @@ fn finish_limits_decoded_chunked_body_size() {
     let body = format!("{json_body}{}", " ".repeat(16384 - json_body.len()));
     let encoded = format!("4000\r\n{body}\r\n0\r\n\r\n");
     let transport = Transport::new(chunked_response(encoded.as_bytes()));
-    block_on(opened(&transport).finish()).unwrap();
+    block_on(opened(&mut transport.clone()).finish()).unwrap();
 
     // Reject an oversized announcement before waiting for its data, and also
     // reject multiple chunks whose combined decoded size exceeds the limit.
     for encoded in ["4001\r\n".to_string(), format!("4000\r\n{body}\r\n1\r\n")] {
         let transport = Transport::new(chunked_response(encoded.as_bytes()));
         assert!(matches!(
-            block_on(opened(&transport).finish()),
+            block_on(opened(&mut transport.clone()).finish()),
             Err(Error::HttpParseError(_))
         ));
     }
@@ -563,7 +600,7 @@ fn finish_rejects_invalid_chunk_framing_and_trailers() {
         let transport = Transport::new(chunked_response(encoded));
         assert!(
             matches!(
-                block_on(opened(&transport).finish()),
+                block_on(opened(&mut transport.clone()).finish()),
                 Err(Error::HttpParseError(_))
             ),
             "{encoded:?}"
@@ -574,7 +611,7 @@ fn finish_rejects_invalid_chunk_framing_and_trailers() {
     for encoded in [oversized_line, oversized_trailers] {
         let transport = Transport::new(chunked_response(encoded.as_bytes()));
         assert!(matches!(
-            block_on(opened(&transport).finish()),
+            block_on(opened(&mut transport.clone()).finish()),
             Err(Error::HttpParseError(_))
         ));
     }
@@ -593,7 +630,7 @@ fn finish_rejects_truncated_chunked_responses() {
     ] {
         let transport = Transport::new(chunked_response(encoded));
         assert!(
-            block_on(opened(&transport).finish()).is_err(),
+            block_on(opened(&mut transport.clone()).finish()).is_err(),
             "{encoded:?}"
         );
     }
@@ -612,7 +649,7 @@ fn finish_rejects_ambiguous_and_unsupported_transfer_encodings() {
         let transport =
             Transport::new(format!("HTTP/1.1 200 OK\r\n{headers}\r\n0\r\n\r\n").into_bytes());
         assert!(matches!(
-            block_on(opened(&transport).finish()),
+            block_on(opened(&mut transport.clone()).finish()),
             Err(Error::HttpParseError(_))
         ));
     }
@@ -641,7 +678,7 @@ fn rejected_status_preserves_code_and_body_without_requiring_json() {
             r#"{"code":50027,"message":"Invalid Webhook Token"}"#,
         ] {
             let transport = Transport::new(response(status, body));
-            let error = block_on(opened(&transport).finish()).unwrap_err();
+            let error = block_on(opened(&mut transport.clone()).finish()).unwrap_err();
             let expected = status[..3].parse::<u16>().unwrap();
             assert!(matches!(error, Error::HttpStatus { status, body: actual }
                 if status == expected && actual.as_slice() == body.as_bytes()));
@@ -649,13 +686,13 @@ fn rejected_status_preserves_code_and_body_without_requiring_json() {
     }
     let transport =
         Transport::new(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 1\r\n\r\n\xff".to_vec());
-    assert!(matches!(block_on(opened(&transport).finish()),
+    assert!(matches!(block_on(opened(&mut transport.clone()).finish()),
         Err(Error::HttpStatus { status: 502, body }) if body.as_slice() == [0xff]));
 
     let transport = Transport::new(
         b"HTTP/1.1 429 Too Many Requests\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nslow\r\n0\r\n\r\n".to_vec()
     );
-    assert!(matches!(block_on(opened(&transport).finish()),
+    assert!(matches!(block_on(opened(&mut transport.clone()).finish()),
         Err(Error::HttpStatus { status: 429, body }) if body.as_slice() == b"slow"));
 }
 
@@ -668,7 +705,7 @@ fn response_errors_identify_missing_fields_and_actual_values() {
         (r#"{"id":"x","attachments":[{}]}"#, "attachments[0].url"),
     ] {
         let transport = Transport::new(response("200 OK", body));
-        assert!(matches!(block_on(opened(&transport).finish()),
+        assert!(matches!(block_on(opened(&mut transport.clone()).finish()),
             Err(Error::InvalidResponse(ResponseError::MissingField { field: actual })) if actual == field));
     }
     for (body, field, expected, actual) in [
@@ -694,7 +731,7 @@ fn response_errors_identify_missing_fields_and_actual_values() {
         ),
     ] {
         let transport = Transport::new(response("200 OK", body));
-        assert!(matches!(block_on(opened(&transport).finish()),
+        assert!(matches!(block_on(opened(&mut transport.clone()).finish()),
             Err(Error::InvalidResponse(ResponseError::InvalidFieldType {
                 field: actual_field, expected: actual_expected, actual: actual_value
             })) if actual_field == field && actual_expected == expected && actual_value == actual));
@@ -709,7 +746,7 @@ fn body_limits_report_announced_size_for_both_encodings() {
     ] {
         let transport = Transport::new(bytes);
         assert!(matches!(
-            block_on(opened(&transport).finish()),
+            block_on(opened(&mut transport.clone()).finish()),
             Err(Error::HttpParseError(HttpError::BodyTooLarge {
                 limit: 16384,
                 size: 16385

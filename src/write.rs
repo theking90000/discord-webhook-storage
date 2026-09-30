@@ -32,6 +32,14 @@ const MAX_RESPONSE_BODYSIZE: usize = 16384;
 ///
 /// Call [`Self::finish`] to obtain the message identifier and attachment URL.
 /// Dropping the writer does not complete the upload.
+///
+/// The transport must already be connected to `discord.com:443` over TCP with
+/// the TLS handshake complete. Uploads use HTTP/1.1 keep-alive; neither closing
+/// the writer nor finishing the upload explicitly closes the transport.
+/// Pass `&mut connection` to [`Self::open`] to borrow the connection until the
+/// writer is finished or dropped.
+/// Only reuse it after [`Self::finish`] returns `Ok`, provided the server keeps
+/// it open. After an error, discard it because reuse is not guaranteed.
 pub struct WriteFile<T> {
     connection: ChunkWriter<T>,
     boundary: String,
@@ -113,14 +121,19 @@ fn generate_boundary() -> String {
 }
 
 impl<T: AsyncWrite + Unpin> WriteFile<T> {
-    /// Start an upload using an established TLS connection to `discord.com:443`.
+    /// Start an upload using an established TCP+TLS connection to `discord.com:443`.
     ///
     /// Sends the HTTP request headers, JSON metadata, and multipart file headers.
-    /// The caller supplies a transport implementing the `futures` I/O traits.
+    /// `connection` must already be connected over TCP with the TLS handshake
+    /// complete. The caller supplies a transport implementing the `futures` I/O traits.
     /// This method does not establish a connection or perform a TLS handshake.
     ///
     /// `credentials` selects the webhook, and `config` sets the file metadata and
-    /// payload allowance. The writer owns the connection after this call.
+    /// payload allowance. Pass `&mut connection` to borrow the connection and
+    /// retain ownership of it. It can be reused after a successful
+    /// [`Self::finish`], provided the server keeps it open. HTTP/1.1 keep-alive
+    /// is used without explicitly closing the underlying transport.
+    /// Passing an owned transport instead moves it into the writer.
     ///
     /// # Errors
     ///
@@ -197,7 +210,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
     ///
     /// Closes the request body if needed, then reads an HTTP/1.1 response with
     /// `Content-Length` or chunked transfer encoding. The decoded response body
-    /// must fit within 16 KiB. This consumes the writer and its connection.
+    /// must fit within 16 KiB. This consumes the writer without explicitly
+    /// closing the transport. If [`Self::open`] received `&mut connection`,
+    /// this releases the borrow without dropping the caller's connection.
+    /// An owned transport is dropped with the writer.
+    ///
+    /// On `Ok`, the complete response has been read and the connection can be
+    /// reused if the server keeps it open. Calling [`AsyncWriteExt::close`] alone
+    /// leaves the response unread and is insufficient for reuse.
     ///
     /// # Errors
     ///
@@ -207,6 +227,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
     /// and response size limits. [`crate::Error::HttpStatus`] retains unsuccessful
     /// statuses and their decoded response bodies. [`crate::Error::InvalidResponse`]
     /// identifies missing or incorrectly typed JSON fields.
+    ///
+    /// An error may leave the request or response incomplete, particularly for
+    /// [`crate::Error::IoError`]. Some errors occur after the complete response
+    /// has been read, but an `Err` does not guarantee that the connection is
+    /// reusable. Discard a retained connection after any error.
     pub async fn finish(mut self) -> Result<WrittenFile> {
         // Send the multipart boundary and final chunk before reading the response.
         self.close().await?;
