@@ -1,4 +1,20 @@
-use crate::{DiscordFileUrlError, Error, Result};
+use crate::{
+    DiscordFileUrlError, Error, ResponseError, Result, WebhookCredentials, http::HttpStatusParser,
+};
+use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
+
+const MAX_RESPONSE_BODY_SIZE: usize = 16384;
+
+#[derive(serde::Deserialize)]
+struct WebhookMessage {
+    attachments: Vec<WebhookAttachment>,
+}
+
+#[derive(serde::Deserialize)]
+struct WebhookAttachment {
+    id: String,
+    url: String,
+}
 
 /// A reference to a file stored on Discord.
 ///
@@ -15,6 +31,84 @@ pub struct DiscordFile {
 }
 
 impl DiscordFile {
+    /// Check whether the download URL has not yet expired.
+    ///
+    /// Delegates to [`DiscordFileUrl::is_valid`] using the local clock without
+    /// contacting Discord. This does not check whether the file still exists.
+    pub fn is_valid(&self) -> bool {
+        self.url.is_valid()
+    }
+
+    /// Renew the download URL by fetching the message that stores this file.
+    ///
+    /// `connection` must already be a secure HTTP/1.1 connection to
+    /// `discord.com:443`. Pass `&mut connection` to retain ownership.
+    /// `credentials` must belong to the webhook that created this message.
+    /// Credentials for another webhook cause an HTTP error from Discord;
+    /// inspect [`Error::HttpStatus`] for its status code and response body.
+    ///
+    /// Sends `GET /api/webhooks/{id}/{token}/messages/{message_id}` and selects
+    /// the attachment with the stored attachment identifier. This also works
+    /// when the current URL has expired. Only a successful renewal updates
+    /// [`Self::url`]; the message identifier remains the same.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IoError`] on connection failure, [`Error::HttpStatus`]
+    /// on a status other than 200, or [`Error::HttpParseError`] on an unreadable
+    /// or oversized HTTP response. The response body is limited to 16 KiB.
+    /// Invalid JSON or attachment fields return [`Error::JsonError`]. A missing
+    /// attachment returns [`Error::InvalidResponse`], and an invalid download
+    /// URL returns [`Error::InvalidDiscordFileUrl`].
+    ///
+    /// Discard the connection after an error or interrupted renewal. Reuse it
+    /// after success only if it is still open.
+    pub async fn renew<T: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        mut connection: T,
+        credentials: &WebhookCredentials<'_>,
+    ) -> Result<()> {
+        let request = format!(
+            "GET /api/webhooks/{}/{}/messages/{} HTTP/1.1\r\nHost: discord.com\r\nAccept: application/json\r\n\r\n",
+            path_segment(credentials.id),
+            path_segment(credentials.token),
+            path_segment(&self.id),
+        );
+        connection.write_all(request.as_bytes()).await?;
+        connection.flush().await?;
+
+        let mut parser = HttpStatusParser::new(&mut connection);
+        let status = parser.status().await?;
+        let mut parser = parser.into_headers();
+        while !parser.is_complete() {
+            parser.next_header().await?;
+        }
+        // These statuses cannot carry an HTTP response body.
+        if status < 200 || matches!(status, 204 | 304) {
+            return Err(Error::HttpStatus {
+                status,
+                body: Vec::new(),
+            });
+        }
+        let body = parser.body(MAX_RESPONSE_BODY_SIZE).await?;
+        if status != 200 {
+            return Err(Error::HttpStatus { status, body });
+        }
+
+        let message: WebhookMessage = serde_json::from_slice(&body)?;
+        let attachment_id = self.url.attachment_id.to_string();
+        let attachment = message
+            .attachments
+            .into_iter()
+            .find(|attachment| attachment.id == attachment_id)
+            .ok_or(ResponseError::AttachmentNotFound {
+                attachment_id: self.url.attachment_id,
+            })?;
+        let url = DiscordFileUrl::parse(&attachment.url)?;
+        self.url = url;
+        Ok(())
+    }
+
     /// Read a file reference saved as a `discord://<id>/<url>` string.
     ///
     /// This checks the format without contacting Discord or checking expiration.
@@ -44,6 +138,21 @@ impl DiscordFile {
             url,
         })
     }
+}
+
+fn path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    encoded
 }
 
 impl TryFrom<&str> for DiscordFile {

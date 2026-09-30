@@ -1,9 +1,11 @@
 use crate::{Error, Result, WebhookUrlError};
 
-/// Credentials that select the Discord webhook used to store files.
+/// Credentials that select the Discord webhook used to store or renew files.
 ///
 /// Create them from a webhook URL with [`Self::parse`]. Keep that URL string
 /// alive for as long as the credentials are needed.
+/// Renewing a file with [`crate::DiscordFile::renew`] requires the credentials
+/// of the webhook that created its message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookCredentials<'a> {
     pub(crate) id: &'a str,

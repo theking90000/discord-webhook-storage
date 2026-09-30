@@ -57,10 +57,19 @@ file's download URL. Save this reference with Serde, as shown above, or use
 `to_string()` to obtain a `discord://<id>/<url>` string. `DiscordFile::parse()`
 reads that string back.
 
-Download URLs expire. Saving a reference does not extend its validity, and the
-library does not renew expired URLs. `DiscordFileUrl::is_valid()` checks the
-expiration time using the local clock, without checking whether the file still
-exists on Discord.
+Download URLs expire. `DiscordFile::is_valid()` and `DiscordFileUrl::is_valid()`
+check the expiration time using the local clock, without checking whether the
+file still exists on Discord. Saving a reference does not extend its validity.
+
+`stored_file.renew(&mut connection, &credentials).await?` fetches the message
+and updates the download URL for the stored attachment, even after expiration.
+The connection must already be a secure HTTP/1.1 connection to `discord.com:443`.
+The credentials must belong to the webhook that created the message. Another
+webhook's credentials cause an HTTP error from Discord, returned as
+`Error::HttpStatus` with the status code and response body.
+
+The file reference stays unchanged if renewal fails. Discard the connection
+after an error or interrupted renewal.
 
 ## Reading a file
 

@@ -1,6 +1,6 @@
 use std::{fmt, io, num::ParseIntError, str::Utf8Error};
 
-/// An error while opening, writing, finishing, or reading a file.
+/// An error while opening, writing, finishing, reading, or renewing a file.
 ///
 /// Match the variants to distinguish invalid file references, connection
 /// failures, and errors returned by Discord. Use [`std::error::Error::source`]
@@ -27,7 +27,7 @@ pub enum Error {
         /// This may contain JSON, text, or other bytes. It is limited to 16 KiB.
         body: Vec<u8>,
     },
-    /// Discord's response lacks valid details for the uploaded file.
+    /// Discord's response lacks valid details for the stored file.
     InvalidResponse(ResponseError),
     /// A write failed without accepting any bytes from that call.
     WriteError(WriteError),
@@ -199,10 +199,15 @@ pub enum HttpError {
     },
 }
 
-/// Why Discord's reply lacks usable details for an uploaded file.
+/// Why Discord's reply lacks usable details for a stored file.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ResponseError {
+    /// The message no longer contains the attachment being renewed.
+    AttachmentNotFound {
+        /// Identifier of the expected attachment.
+        attachment_id: u64,
+    },
     /// A required file detail is missing.
     MissingField {
         /// JSON field path, such as `attachments[0].url`.
@@ -371,6 +376,9 @@ impl fmt::Display for HttpError {
 impl fmt::Display for ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AttachmentNotFound { attachment_id } => {
+                write!(f, "message does not contain attachment {attachment_id}")
+            }
             Self::MissingField { field } => write!(f, "missing field {field}"),
             Self::InvalidFieldType {
                 field, expected, ..
