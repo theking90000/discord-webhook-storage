@@ -50,37 +50,94 @@ fn rejects_invalid_attachment_urls_with_field_errors() {
     let prefix = "https://cdn.discordapp.com/attachments/";
     for (suffix, expected) in [
         ("", MissingField { field: "query" }),
-        ("123?ex=1&is=2&hm=aa", MissingField { field: "attachment_id" }),
-        ("123/456?ex=1&is=2&hm=aa", MissingField { field: "attachment_name" }),
-        ("/456/f?ex=1&is=2&hm=aa", InvalidField { field: "channel_id" }),
-        ("123/no/f?ex=1&is=2&hm=aa", InvalidField { field: "attachment_id" }),
-        ("18446744073709551616/456/f?ex=1&is=2&hm=aa", InvalidField { field: "channel_id" }),
-        ("123/456/f/extra?ex=1&is=2&hm=aa", InvalidField { field: "attachment_name" }),
-        ("123/456/f name?ex=1&is=2&hm=aa", InvalidField { field: "attachment_name" }),
+        (
+            "123?ex=1&is=2&hm=aa",
+            MissingField {
+                field: "attachment_id",
+            },
+        ),
+        (
+            "123/456?ex=1&is=2&hm=aa",
+            MissingField {
+                field: "attachment_name",
+            },
+        ),
+        (
+            "/456/f?ex=1&is=2&hm=aa",
+            InvalidField {
+                field: "channel_id",
+            },
+        ),
+        (
+            "123/no/f?ex=1&is=2&hm=aa",
+            InvalidField {
+                field: "attachment_id",
+            },
+        ),
+        (
+            "18446744073709551616/456/f?ex=1&is=2&hm=aa",
+            InvalidField {
+                field: "channel_id",
+            },
+        ),
+        (
+            "123/456/f/extra?ex=1&is=2&hm=aa",
+            InvalidField {
+                field: "attachment_name",
+            },
+        ),
+        (
+            "123/456/f name?ex=1&is=2&hm=aa",
+            InvalidField {
+                field: "attachment_name",
+            },
+        ),
         ("123/456/f?is=2&hm=aa", MissingField { field: "ex" }),
         ("123/456/f?ex=1&hm=aa", MissingField { field: "is" }),
         ("123/456/f?ex=1&is=2", MissingField { field: "hm" }),
         ("123/456/f?ex=&is=2&hm=aa", InvalidField { field: "ex" }),
         ("123/456/f?ex=xyz&is=2&hm=aa", InvalidField { field: "ex" }),
-        ("123/456/f?ex=10000000000000000&is=2&hm=aa", InvalidField { field: "ex" }),
+        (
+            "123/456/f?ex=10000000000000000&is=2&hm=aa",
+            InvalidField { field: "ex" },
+        ),
         ("123/456/f?ex=1&is=+2&hm=aa", InvalidField { field: "is" }),
         ("123/456/f?ex=1&is=2&hm=zz", InvalidField { field: "hm" }),
         ("123/456/f?ex=1&is=2&hm=", InvalidField { field: "hm" }),
-        ("123/456/f?ex=1&ex=2&is=2&hm=aa", DuplicateParameter { field: "ex" }),
-        ("123/456/f?ex=1&is=2&is=3&hm=aa", DuplicateParameter { field: "is" }),
-        ("123/456/f?ex=1&is=2&hm=aa&hm=bb", DuplicateParameter { field: "hm" }),
-        ("123/456/f?ex=1&is=2&hm=aa#fragment", InvalidField { field: "query" }),
+        (
+            "123/456/f?ex=1&ex=2&is=2&hm=aa",
+            DuplicateParameter { field: "ex" },
+        ),
+        (
+            "123/456/f?ex=1&is=2&is=3&hm=aa",
+            DuplicateParameter { field: "is" },
+        ),
+        (
+            "123/456/f?ex=1&is=2&hm=aa&hm=bb",
+            DuplicateParameter { field: "hm" },
+        ),
+        (
+            "123/456/f?ex=1&is=2&hm=aa#fragment",
+            InvalidField { field: "query" },
+        ),
     ] {
         let url = format!("{prefix}{suffix}");
         let error = DiscordFileUrl::parse(&url).unwrap_err();
         assert!(matches!(error, Error::InvalidDiscordFileUrl(actual) if actual == expected));
         assert_eq!(
-            error.source().unwrap().downcast_ref::<DiscordFileUrlError>(),
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<DiscordFileUrlError>(),
             Some(&expected)
         );
     }
 
-    for url in ["", "https://example.com/attachments/123/456/f", "http://cdn.discordapp.com/attachments/123/456/f"] {
+    for url in [
+        "",
+        "https://example.com/attachments/123/456/f",
+        "http://cdn.discordapp.com/attachments/123/456/f",
+    ] {
         assert!(matches!(
             DiscordFileUrl::parse(url),
             Err(Error::InvalidDiscordFileUrl(InvalidPrefix))

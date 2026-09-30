@@ -429,7 +429,11 @@ fn finish_releases_connection_for_another_upload() {
         );
         let request = transport.written();
         let (_, multipart) = decode_request(&request);
-        assert!(multipart.windows(payload.len()).any(|bytes| bytes == payload));
+        assert!(
+            multipart
+                .windows(payload.len())
+                .any(|bytes| bytes == payload)
+        );
 
         let mut state = transport.0.borrow_mut();
         assert_eq!(state.read_at, state.response.len());
@@ -519,7 +523,9 @@ fn finish_rejects_invalid_json_and_missing_fields() {
         r#"{"id":"x","attachments":[{"url":7}]}"#,
     ] {
         let transport = Transport::new(response("200 OK", body));
-        let error = block_on(opened(&mut transport.clone()).finish()).err().unwrap();
+        let error = block_on(opened(&mut transport.clone()).finish())
+            .err()
+            .unwrap();
         if body == "not json" {
             assert!(matches!(error, Error::JsonError(_)));
         } else {
@@ -578,16 +584,16 @@ fn finish_decodes_fragmented_chunks_extensions_and_trailers_without_eof() {
             assert_eq!(
                 serde_json::to_value(result).unwrap(),
                 json!({
-                "id": "message-1",
-                "url": {
-                    "channel_id": 123,
-                    "attachment_id": 456,
-                    "attachment_name": "file.bin",
-                    "ex": 0x6abe3fd5_u64,
-                    "is": 0x6abcee55_u64,
-                    "hm": "aabbcc"
-                }
-            })
+                    "id": "message-1",
+                    "url": {
+                        "channel_id": 123,
+                        "attachment_id": 456,
+                        "attachment_name": "file.bin",
+                        "ex": 0x6abe3fd5_u64,
+                        "is": 0x6abcee55_u64,
+                        "hm": "aabbcc"
+                    }
+                })
             );
             let state = transport.0.borrow();
             assert_eq!(state.read_at, state.response.len());

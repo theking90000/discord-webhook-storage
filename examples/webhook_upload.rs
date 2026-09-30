@@ -29,16 +29,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .tls(Arc::new(tls))
     .build()?;
 
-    // DO 2 Uploads 
+    // DO 2 Uploads
     for i in 0..4 {
         let now = Instant::now();
         println!("Upload {i} : Acquiring connection for upload");
         let mut connection = pool.acquire().await?;
-        println!("Upload {i} : Acquired connection for upload - took {:?}", now.elapsed());
+        println!(
+            "Upload {i} : Acquired connection for upload - took {:?}",
+            now.elapsed()
+        );
         let now = Instant::now();
 
-        let mut file = WriteFile::open(&mut connection, &credentials, &WriteConfig::default()).await?;
-        println!("Upload {i} : Opened file for upload - took {:?}", now.elapsed());
+        let mut file =
+            WriteFile::open(&mut connection, &credentials, &WriteConfig::default()).await?;
+        println!(
+            "Upload {i} : Opened file for upload - took {:?}",
+            now.elapsed()
+        );
         let now = Instant::now();
 
         let pattern: Vec<u8> = (0..WRITE_SIZE).map(|i| (i & 0xff) as u8).collect();
@@ -50,22 +57,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             file.write_all(&pattern[..count]).await?;
             remaining -= count;
         }
-        println!("Upload {i} : Finished writing file - took {:?}", now.elapsed());
+        println!(
+            "Upload {i} : Finished writing file - took {:?}",
+            now.elapsed()
+        );
 
         let now = Instant::now();
         match file.finish().await {
             Ok(result) => {
                 println!("{}", serde_json::to_string(&result)?);
                 connection.release();
-            },
+            }
             Err(e) => {
                 println!("Error finishing upload: {e}");
                 connection.discard();
             }
         };
-        println!("Upload {i} : Finished writing file - took {:?}", now.elapsed());
-
-        
+        println!(
+            "Upload {i} : Finished writing file - took {:?}",
+            now.elapsed()
+        );
     }
 
     Ok(())

@@ -5,9 +5,8 @@ use std::{
 };
 
 use crate::{
-    Error, ResponseError, Result, WebhookCredentials, WriteError, chunk_writer::ChunkWriter,
-    http::HttpStatusParser,
-    DiscordFile, DiscordFileUrl,
+    DiscordFile, DiscordFileUrl, Error, ResponseError, Result, WebhookCredentials, WriteError,
+    chunk_writer::ChunkWriter, http::HttpStatusParser,
 };
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
