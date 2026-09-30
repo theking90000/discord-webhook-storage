@@ -1,4 +1,5 @@
 use std::{
+    io::IoSlice,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -249,6 +250,30 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteFile<T> {
         };
 
         let result = Pin::new(&mut this.connection).poll_write(cx, buf);
+
+        if let Poll::Ready(Ok(n)) = result {
+            this.state = WriteFileState::Writing(remaining - n);
+        }
+
+        result
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+
+        let Some(buf_len) = bufs.iter().try_fold(0usize, |n, buf| n.checked_add(buf.len())) else {
+            return Poll::Ready(Err(std::io::Error::other("file is not writable")));
+        };
+        let remaining = match this.remaining_write(buf_len) {
+            Ok(n) => n,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+
+        let result = Pin::new(&mut this.connection).poll_write_vectored(cx, bufs);
 
         if let Poll::Ready(Ok(n)) = result {
             this.state = WriteFileState::Writing(remaining - n);
