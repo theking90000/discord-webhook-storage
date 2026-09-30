@@ -35,7 +35,7 @@ serde_json = "1.0.151"
 tokio-tcp-pool = { version = "0.1.3", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.53", features = ["rt", "macros"] }
+tokio = { version = "1.53", features = ["rt", "macros", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 webpki-roots = "1.0"
 
@@ -49,6 +49,10 @@ required-features = ["tokio-tcp-pool"]
 
 [[example]]
 name = "webhook_upload_renew"
+required-features = ["tokio-tcp-pool"]
+
+[[example]]
+name = "webhook_parallel_upload_renew_download"
 required-features = ["tokio-tcp-pool"]
 
 [lints.rust]
