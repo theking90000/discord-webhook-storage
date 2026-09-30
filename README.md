@@ -71,6 +71,20 @@ webhook's credentials cause an HTTP error from Discord, returned as
 The file reference stays unchanged if renewal fails. Discard the connection
 after an error or interrupted renewal.
 
+`renew_urls(&mut connection, &BotCredentials { token }, &mut urls).await?`
+renews multiple attachment URLs in place with a bot token. `urls` can be a
+mutable vector, slice, or array of `DiscordFileUrl`, including URLs that have
+not expired. An iterator such as `files.iter_mut().map(|file| &mut file.url)`
+updates the URLs of stored `DiscordFile` references directly. The connection
+must already use TLS to `discord.com:443`.
+
+The function sends JSON requests to `/api/v9/attachments/refresh-urls` in batches
+of at most 50 URLs and updates each URL using the response's `original` field.
+Repeated URLs are all updated. A missing result is an error. HTTP errors,
+including rate limits, retain Discord's status and response body; the caller
+decides when to retry. Each batch is validated before updating its URLs. If a
+later batch fails, earlier successful batches remain updated.
+
 ## Reading a file
 
 `ReadFile::open(connection, &stored_file)` opens a stored file for reading from

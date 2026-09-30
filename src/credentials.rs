@@ -1,5 +1,22 @@
 use crate::{Error, Result, WebhookUrlError};
 
+/// A bot token used to renew attachment URLs with [`crate::renew_urls`].
+///
+/// The token string must stay alive while these credentials are used.
+#[derive(Clone, Eq, PartialEq)]
+pub struct BotCredentials<'a> {
+    /// Bot token without the `Bot ` authorization prefix.
+    pub token: &'a str,
+}
+
+impl std::fmt::Debug for BotCredentials<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BotCredentials")
+            .field("token", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Credentials that select the Discord webhook used to store or renew files.
 ///
 /// Create them from a webhook URL with [`Self::parse`]. Keep that URL string

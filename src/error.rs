@@ -8,6 +8,9 @@ use std::{fmt, io, num::ParseIntError, str::Utf8Error};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// The bot token is empty or cannot safely be sent in an HTTP header.
+    /// The error does not contain the token.
+    InvalidBotToken,
     /// The webhook URL is invalid or lacks the credentials needed to create a file.
     InvalidWebhookUrl(WebhookUrlError),
     /// The file reference or download URL is invalid or expired.
@@ -203,6 +206,13 @@ pub enum HttpError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ResponseError {
+    /// Discord did not return a renewed URL for an input URL.
+    MissingRefreshedUrl {
+        /// Zero-based index of the URL in the complete input sequence.
+        index: usize,
+    },
+    /// Discord returned an unexpected original URL or conflicting results for it.
+    InvalidRefreshedUrls,
     /// The message no longer contains the attachment being renewed.
     AttachmentNotFound {
         /// Identifier of the expected attachment.
@@ -251,6 +261,9 @@ pub enum WriteError {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidBotToken => {
+                f.write_str("bot token is empty or contains invalid characters")
+            }
             Self::InvalidWebhookUrl(error) => write!(f, "invalid webhook URL: {error}"),
             Self::InvalidDiscordFileUrl(error) => write!(f, "invalid attachment URL: {error}"),
             Self::IoError(error) => write!(f, "transport I/O failed: {error}"),
@@ -259,7 +272,7 @@ impl fmt::Display for Error {
             Self::HttpStatus { status, .. } => {
                 write!(f, "Discord returned unexpected HTTP status {status}")
             }
-            Self::InvalidResponse(error) => write!(f, "invalid upload response: {error}"),
+            Self::InvalidResponse(error) => write!(f, "invalid Discord response: {error}"),
             Self::WriteError(error) => write!(f, "write rejected: {error}"),
             Self::InvalidRange { start, end } => {
                 write!(f, "invalid byte range {start}-{end}: expected start < end")
@@ -376,6 +389,10 @@ impl fmt::Display for HttpError {
 impl fmt::Display for ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingRefreshedUrl { index } => {
+                write!(f, "missing renewed URL for input at index {index}")
+            }
+            Self::InvalidRefreshedUrls => f.write_str("unexpected or conflicting renewed URLs"),
             Self::AttachmentNotFound { attachment_id } => {
                 write!(f, "message does not contain attachment {attachment_id}")
             }
@@ -467,7 +484,7 @@ impl std::error::Error for Error {
             Self::HttpParseError(error) => Some(error),
             Self::InvalidResponse(error) => Some(error),
             Self::WriteError(error) => Some(error),
-            Self::HttpStatus { .. } | Self::InvalidRange { .. } => None,
+            Self::InvalidBotToken | Self::HttpStatus { .. } | Self::InvalidRange { .. } => None,
         }
     }
 }

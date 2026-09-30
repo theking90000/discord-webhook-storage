@@ -8,11 +8,11 @@ mod http;
 mod read;
 mod write;
 
-pub use credentials::WebhookCredentials;
+pub use credentials::{BotCredentials, WebhookCredentials};
 pub use error::{
     DiscordFileUrlError, Error, HttpError, HttpPart, ResponseError, Result, WebhookUrlError,
     WriteError,
 };
-pub use file::{DiscordFile, DiscordFileUrl};
+pub use file::{DiscordFile, DiscordFileUrl, renew_urls};
 pub use read::ReadFile;
 pub use write::{WriteConfig, WriteFile};

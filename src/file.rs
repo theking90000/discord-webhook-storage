@@ -1,9 +1,148 @@
 use crate::{
-    DiscordFileUrlError, Error, ResponseError, Result, WebhookCredentials, http::HttpStatusParser,
+    BotCredentials, DiscordFileUrlError, Error, ResponseError, Result, WebhookCredentials,
+    http::HttpStatusParser,
 };
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use std::collections::HashMap;
 
 const MAX_RESPONSE_BODY_SIZE: usize = 16384;
+const REFRESH_BATCH_SIZE: usize = 50;
+const MAX_REFRESH_RESPONSE_BODY_SIZE: usize = 1024 * 1024;
+
+#[derive(serde::Serialize)]
+struct RefreshUrlsRequest<'a> {
+    attachment_urls: Vec<&'a str>,
+}
+
+#[derive(serde::Deserialize)]
+struct RefreshUrlsResponse {
+    refreshed_urls: Vec<RefreshedUrl>,
+}
+
+#[derive(serde::Deserialize)]
+struct RefreshedUrl {
+    original: String,
+    refreshed: String,
+}
+
+/// Renew attachment download URLs in place using bot credentials.
+///
+/// Pass a mutable vector, slice, or array of [`DiscordFileUrl`] values, or an
+/// iterator of mutable references. To renew stored files directly, pass
+/// `files.iter_mut().map(|file| &mut file.url)`. Both expired and still-valid
+/// URLs can be renewed. Empty input does nothing.
+///
+/// `connection` must already be a secure HTTP/1.1 connection to
+/// `discord.com:443`. Pass `&mut connection` to retain ownership.
+///
+/// On success, all supplied URLs have been updated. If renewal fails, some
+/// URLs may already have been updated. Failures, including rate limits, are
+/// returned without automatic retries. Discard the connection after an error
+/// or interrupted renewal. Reuse it after success only if it is still open.
+///
+/// # Errors
+///
+/// Invalid bot credentials return [`Error::InvalidBotToken`]. Connection
+/// failures return [`Error::IoError`]. If Discord rejects the renewal,
+/// [`Error::HttpStatus`] contains its status code and error response.
+///
+/// Unusable responses return [`Error::HttpParseError`], [`Error::JsonError`],
+/// or [`Error::InvalidResponse`]. Invalid renewed URLs return
+/// [`Error::InvalidDiscordFileUrl`].
+pub async fn renew_urls<'a, T, I>(
+    mut connection: T,
+    credentials: &BotCredentials<'_>,
+    urls: I,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+    I: IntoIterator<Item = &'a mut DiscordFileUrl>,
+{
+    if credentials.token.is_empty()
+        || !credentials
+            .token
+            .bytes()
+            .all(|byte| (b'!'..=b'~').contains(&byte))
+    {
+        return Err(Error::InvalidBotToken);
+    }
+
+    let mut urls = urls.into_iter();
+    let mut completed = 0;
+    loop {
+        let batch: Vec<&mut DiscordFileUrl> = urls.by_ref().take(REFRESH_BATCH_SIZE).collect();
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let originals: Vec<String> = batch.iter().map(|url| url.to_string()).collect();
+        let request = RefreshUrlsRequest {
+            attachment_urls: originals.iter().map(|url| url.as_str()).collect(),
+        };
+        let body = serde_json::to_vec(&request)?;
+        let headers = format!(
+            "POST /api/v9/attachments/refresh-urls HTTP/1.1\r\nHost: discord.com\r\nAuthorization: Bot {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\n\r\n",
+            credentials.token,
+            body.len(),
+        );
+        connection.write_all(headers.as_bytes()).await?;
+        connection.write_all(&body).await?;
+        connection.flush().await?;
+
+        let mut parser = HttpStatusParser::new(&mut connection);
+        let status = parser.status().await?;
+        let mut parser = parser.into_headers();
+        while !parser.is_complete() {
+            parser.next_header().await?;
+        }
+        if status < 200 || matches!(status, 204 | 304) {
+            return Err(Error::HttpStatus {
+                status,
+                body: Vec::new(),
+            });
+        }
+        let limit = if status == 200 {
+            MAX_REFRESH_RESPONSE_BODY_SIZE
+        } else {
+            MAX_RESPONSE_BODY_SIZE
+        };
+        let body = parser.body(limit).await?;
+        if status != 200 {
+            return Err(Error::HttpStatus { status, body });
+        }
+
+        let response: RefreshUrlsResponse = serde_json::from_slice(&body)?;
+        let mut results = HashMap::new();
+        for entry in response.refreshed_urls {
+            if !request.attachment_urls.contains(&entry.original.as_str()) {
+                return Err(ResponseError::InvalidRefreshedUrls.into());
+            }
+            let url = DiscordFileUrl::parse(&entry.refreshed)?;
+            if let Some(previous) = results.get(&entry.original) {
+                if previous != &url {
+                    return Err(ResponseError::InvalidRefreshedUrls.into());
+                }
+            } else {
+                results.insert(entry.original, url);
+            }
+        }
+        let updates: Vec<DiscordFileUrl> = originals
+            .iter()
+            .enumerate()
+            .map(|(offset, original)| {
+                results.get(original).cloned().ok_or_else(|| {
+                    ResponseError::MissingRefreshedUrl {
+                        index: completed + offset,
+                    }
+                    .into()
+                })
+            })
+            .collect::<Result<_>>()?;
+        completed += batch.len();
+        for (target, url) in batch.into_iter().zip(updates) {
+            *target = url;
+        }
+    }
+}
 
 #[derive(serde::Deserialize)]
 struct WebhookMessage {
