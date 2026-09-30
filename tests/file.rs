@@ -1,3 +1,5 @@
+//! Tests for Discord file parsing, formatting, and serialization.
+
 use std::error::Error as _;
 
 use discord_webhook_storage::{DiscordFile, DiscordFileUrl, DiscordFileUrlError, Error};
@@ -41,6 +43,62 @@ fn serializes_structured_fields_and_preserves_discord_file_display() {
     assert_eq!(json["url"]["ex"], 0x6abe3fd5_u64);
     assert_eq!(serde_json::from_value::<DiscordFile>(json).unwrap(), file);
     assert_eq!(file.to_string(), format!("discord://message-1/{URL}"));
+    assert_eq!(DiscordFile::parse(&file.to_string()).unwrap(), file);
+    assert_eq!(
+        DiscordFile::try_from(file.to_string().as_str()).unwrap(),
+        file
+    );
+}
+
+#[test]
+fn rejects_invalid_discord_file_values() {
+    use DiscordFileUrlError::{InvalidField, InvalidPrefix, MissingField};
+
+    for (value, expected) in [
+        (
+            format!("https://message-1/{URL}"),
+            InvalidField { field: "prefix" },
+        ),
+        (
+            "discord://message-1".to_owned(),
+            MissingField { field: "url" },
+        ),
+        (format!("discord:///{URL}"), InvalidField { field: "id" }),
+        (
+            format!("discord://message 1/{URL}"),
+            InvalidField { field: "id" },
+        ),
+        (
+            format!("discord://message?1/{URL}"),
+            InvalidField { field: "id" },
+        ),
+        (
+            format!("discord://message#1/{URL}"),
+            InvalidField { field: "id" },
+        ),
+        (
+            format!("discord://message\u{0000}1/{URL}"),
+            InvalidField { field: "id" },
+        ),
+        (
+            "discord://message-1/".to_owned(),
+            InvalidField { field: "url" },
+        ),
+        (
+            "discord://message-1/https://example.com/file".to_owned(),
+            InvalidPrefix,
+        ),
+        (
+            "discord://message-1/https://cdn.discordapp.com/attachments/123/456/f?ex=1&is=2&hm=zz"
+                .to_owned(),
+            InvalidField { field: "hm" },
+        ),
+    ] {
+        assert!(matches!(
+            DiscordFile::parse(&value),
+            Err(Error::InvalidDiscordFileUrl(actual)) if actual == expected
+        ));
+    }
 }
 
 #[test]

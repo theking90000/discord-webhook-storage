@@ -11,6 +11,44 @@ pub struct DiscordFile {
     pub url: DiscordFileUrl,
 }
 
+impl DiscordFile {
+    /// Parse `discord://<id>/<url>`, preserving the complete attachment URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDiscordFileUrl`] for an invalid prefix, an empty
+    /// identifier, reserved or whitespace characters in the identifier, or an
+    /// invalid attachment URL. Errors do not retain the input.
+    pub fn parse(value: &str) -> Result<Self> {
+        let file = value
+            .strip_prefix("discord://")
+            .ok_or(DiscordFileUrlError::InvalidField { field: "prefix" })?;
+        let (id, url) = file
+            .split_once('/')
+            .ok_or(DiscordFileUrlError::MissingField { field: "url" })?;
+        let id = required(Some(id), "id")?;
+        if id.contains(['?', '#'])
+            || id.chars().any(char::is_whitespace)
+            || id.chars().any(char::is_control)
+        {
+            return Err(DiscordFileUrlError::InvalidField { field: "id" }.into());
+        }
+        let url = DiscordFileUrl::parse(required(Some(url), "url")?)?;
+        Ok(Self {
+            id: id.to_owned(),
+            url,
+        })
+    }
+}
+
+impl TryFrom<&str> for DiscordFile {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        Self::parse(value)
+    }
+}
+
 /// Owned fields parsed from a signed Discord CDN attachment URL.
 ///
 /// Formatting reconstructs the URL with query parameters ordered as `ex`, `is`,
