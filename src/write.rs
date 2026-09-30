@@ -30,7 +30,11 @@ const MAX_RESPONSE_BODYSIZE: usize = 16384;
 /// [`AsyncWriteExt::close`] finishes the request body and keeps the transport open
 /// so that [`Self::finish`] can read the response.
 ///
-/// Call [`Self::finish`] to obtain the message identifier and attachment URL.
+/// Completing [`AsyncWriteExt::write_all`] does not guarantee that the server
+/// has received all file bytes. Buffered bytes may be sent later, but waiting
+/// for a fixed delay provides no completion guarantee. Only [`Self::finish`]
+/// returning `Ok` confirms that the complete upload succeeded and returns its
+/// message identifier and attachment URL.
 /// Dropping the writer does not complete the upload.
 ///
 /// The transport must already be connected to `discord.com:443` over TCP with
@@ -215,8 +219,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
     /// this releases the borrow without dropping the caller's connection.
     /// An owned transport is dropped with the writer.
     ///
-    /// On `Ok`, the complete response has been read and the connection can be
-    /// reused if the server keeps it open. Calling [`AsyncWriteExt::close`] alone
+    /// On `Ok`, Discord has accepted the complete upload, the complete response
+    /// has been read, and the connection can be reused if the server keeps it
+    /// open. Calling [`AsyncWriteExt::close`] alone
     /// leaves the response unread and is insufficient for reuse.
     ///
     /// # Errors
