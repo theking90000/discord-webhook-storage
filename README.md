@@ -1,8 +1,8 @@
 # Discord webhook storage
 
-Use Discord webhooks as file storage through an asynchronous, file-like API.
-Files of up to 20 MB can be stored and retrieved, with Range support and
-signed URL renewal.
+Store files on Discord and read them back with an asynchronous file API.
+Open a file, write its contents, and finish to obtain a reference to the stored
+file. Reading supports both complete files and selected byte ranges.
 
 ## Installation
 
@@ -11,11 +11,11 @@ signed URL renewal.
 discord-webhook-storage = "0.1.0"
 ```
 
-## Basic usage
+## Writing a file
 
-Uploading a file follows the same sequence as writing to a local file: open,
-write, close. Calling `finish()` instead of `close()` additionally returns the
-ID and URL of the uploaded file.
+`WriteFile::open()` creates a new file through a Discord webhook. Write its
+contents with the usual `futures::AsyncWrite` operations, then call `finish()`
+to confirm that Discord stored it and obtain its reference.
 
 ```rust,no_run
 use discord_webhook_storage::{Result, WebhookCredentials, WriteConfig, WriteFile};
@@ -40,39 +40,56 @@ where
 }
 ```
 
-- **`WriteFile::open()`** opens a new file. No identifier is required: Discord
-  assigns one once the upload completes.
-- **`write_all()`, `flush()`**: `WriteFile` implements `futures::AsyncWrite`, so
-  the standard asynchronous write operations apply.
-- **`close().await`** finishes the request body without checking whether Discord
-  accepted the upload.
-- **`finish().await`** closes the file if needed, checks Discord's
-  response, and returns a Serde-serializable `DiscordFile` containing the
-  message `id` and a structured `DiscordFileUrl` in `url`. The latter stores
-  `channel_id`, `attachment_id`, `attachment_name`, `ex`, `is`, and `hm`.
-  `DiscordFileUrl::parse()` parses an attachment URL, and `to_string()` rebuilds it.
+`flush()` sends any buffered bytes without finishing the file. `close()` ends
+writing, but only a successful `finish()` confirms that Discord accepted the
+complete file. `finish()` closes the file if needed. Dropping the writer does
+not complete the upload.
 
-By default, the file is named `file.bin` and may be up to 20,000,000 bytes. A
-write that would exceed this limit fails without sending any data. Discord may
-enforce a different maximum.
+`WriteConfig::default()` names the file `file.bin` and limits its size to
+20,000,000 bytes. These settings cannot currently be customized. A write that
+would exceed the limit fails without accepting any bytes from that call.
+Discord may enforce a different maximum.
 
-> **Note:** dropping a `WriteFile` without closing it does not complete the
-> upload.
+## Keeping a file reference
 
-### Connection
+`finish()` returns a `DiscordFile` containing the message identifier and the
+file's download URL. Save this reference with Serde, as shown above, or use
+`to_string()` to obtain a `discord://<id>/<url>` string. `DiscordFile::parse()`
+reads that string back.
 
-The library does not open connections; the caller supplies one. It must already
-be connected to `discord.com:443` with the TLS handshake complete, and it must
-implement `futures::AsyncRead`, `AsyncWrite` and `Unpin`.
+Download URLs expire. Saving a reference does not extend its validity, and the
+library does not renew expired URLs. `DiscordFileUrl::is_valid()` checks the
+expiration time using the local clock, without checking whether the file still
+exists on Discord.
 
-- Passing `&mut connection` leaves ownership with the caller. Passing the
-  connection by value moves it into the writer, which drops it along with the
-  writer.
-- Uploads use HTTP/1.1 keep-alive. The library never closes the connection.
-- A connection may be reused only after `finish()` returns `Ok` and provided
-  Discord has kept it open. `close()` alone leaves the response unread, so the
-  connection should not be reused. After any error, including `IoError`, it
-  should be discarded.
+## Reading a file
+
+`ReadFile::open(connection, &stored_file)` opens a stored file for reading from
+the beginning. It accepts either a `DiscordFile` or a `DiscordFileUrl`. Read
+the contents with the usual `futures::AsyncRead` operations, such as
+`read_to_end()`.
+
+`ReadFile::open_with_range(connection, &stored_file, start, end)` reads only
+part of the file. Byte offsets start at zero. `Some(end)` includes the byte at
+that offset and must be greater than `start`. `None` reads from `start` to the
+end of the file.
+
+Reading stops at the end of the file or selected range. An interrupted download
+returns an error. Opening an expired or invalid download URL also returns an
+error.
+
+## Connections
+
+The caller supplies an already connected secure connection to `discord.com:443`
+for writing, or `cdn.discordapp.com:443` for reading. The connection must use
+TLS and HTTP/1.1 and implement `futures::AsyncRead`, `futures::AsyncWrite`, and
+`Unpin`.
+
+Pass `&mut connection` to keep ownership of it. After a successful `finish()`,
+an upload connection can be reused if it is still open. For reading, read to
+the end and drop the reader before reusing the connection. Discard a retained
+connection after an error or an interrupted operation. Passing a connection by
+value makes the file own it and drop it when finished or dropped.
 
 ## Full example
 
@@ -85,7 +102,7 @@ DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
 ```
 
 The `tokio-tcp-pool` feature is required only for this example. The library
-accepts any compatible transport, with or without it.
+accepts any connection that meets the requirements above.
 
 ## Documentation
 
