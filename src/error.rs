@@ -42,12 +42,6 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-impl From<httparse::Error> for Error {
-    fn from(_: httparse::Error) -> Self {
-        HttpParseError
-    }
-}
-
 impl From<str::Utf8Error> for Error {
     fn from(_: str::Utf8Error) -> Self {
         HttpParseError

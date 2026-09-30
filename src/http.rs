@@ -241,15 +241,25 @@ pub(crate) async fn read_chunked_body<T: AsyncRead + Unpin>(
 
     loop {
         read_chunk_line(&mut reader, &mut line).await?;
-        if !line.first().is_some_and(u8::is_ascii_hexdigit) {
+        let chunk_line = &line[..line.len() - 2];
+        let size_end = chunk_line
+            .iter()
+            .position(|&byte| byte == b';')
+            .unwrap_or(chunk_line.len());
+        let size_bytes = chunk_line[..size_end].trim_ascii_end();
+        if size_bytes.is_empty()
+            || size_bytes.len() > 16
+            || !size_bytes.iter().all(u8::is_ascii_hexdigit)
+            || chunk_line[..size_end]
+                .iter()
+                .skip(size_bytes.len())
+                .any(|&byte| byte != b' ' && byte != b'\t')
+            || chunk_line.contains(&b'\r')
+        {
             return Err(HttpParseError);
         }
-        let size = match httparse::parse_chunk_size(&line).map_err(|_| HttpParseError)? {
-            httparse::Status::Complete((_, size)) => {
-                usize::try_from(size).map_err(|_| HttpParseError)?
-            }
-            httparse::Status::Partial => return Err(HttpParseError),
-        };
+        let size = usize::from_str_radix(std::str::from_utf8(size_bytes)?, 16)
+            .map_err(|_| HttpParseError)?;
 
         if size == 0 {
             break;
@@ -280,12 +290,21 @@ pub(crate) async fn read_chunked_body<T: AsyncRead + Unpin>(
         if line == b"\r\n" {
             return Ok(body);
         }
-        line.extend_from_slice(b"\r\n");
-        let mut headers = [httparse::EMPTY_HEADER; 1];
-        if !matches!(
-            httparse::parse_headers(&line, &mut headers)?,
-            httparse::Status::Complete(_)
-        ) {
+        let trailer = &line[..line.len() - 2];
+        let colon = trailer
+            .iter()
+            .position(|&byte| byte == b':')
+            .ok_or(HttpParseError)?;
+        let name = &trailer[..colon];
+        let value = &trailer[colon + 1..];
+        if name.is_empty()
+            || !name.iter().all(|&byte| {
+                byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+            })
+            || !value
+                .iter()
+                .all(|&byte| byte == b'\t' || (byte >= b' ' && byte != 0x7f))
+        {
             return Err(HttpParseError);
         }
     }
