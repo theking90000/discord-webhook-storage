@@ -8,27 +8,38 @@ use discord_webhook_storage::{WebhookCredentials, WriteConfig, WriteFile};
 use futures::AsyncWriteExt;
 use tokio_tcp_pool::{Pool, Route, rustls};
 
-const FILE_SIZE: usize = 20_000_000;
+const FILE_SIZE: usize = 5_000_000;
+const WRITE_SIZE: usize = 64 * 1024;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let url = std::env::var("DISCORD_WEBHOOK_URL")?;
     let credentials = WebhookCredentials::parse(&url)?;
 
-    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let roots =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
     let tls = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
+
     let pool = Pool::builder(Route::Direct {
         target: "discord.com:443".parse()?,
     })
     .tls(Arc::new(tls))
     .build()?;
+
     let connection = pool.acquire().await?;
 
-    let mut file = WriteFile::open(connection, &credentials, &WriteConfig::default()).await?;
-    let pattern = std::iter::once(0_u8).chain(1..=255).collect::<Vec<_>>();
+    let mut file =
+        WriteFile::open(connection, &credentials, &WriteConfig::default()).await?;
+
+    let pattern: Vec<u8> = (0..WRITE_SIZE)
+        .map(|i| (i & 0xff) as u8)
+        .collect();
+
     let mut remaining = FILE_SIZE;
+
     while remaining > 0 {
         let count = remaining.min(pattern.len());
         file.write_all(&pattern[..count]).await?;
@@ -37,5 +48,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let result = file.finish().await?;
     println!("{}", serde_json::to_string(&result)?);
+
     Ok(())
 }
