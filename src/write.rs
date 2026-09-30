@@ -7,10 +7,10 @@ use std::{
 use crate::{
     Error, ResponseError, Result, WebhookCredentials, WriteError, chunk_writer::ChunkWriter,
     http::HttpStatusParser,
+    DiscordFile, DiscordFileUrl,
 };
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 // Default upload limit enforced by this crate, excluding multipart framing.
@@ -61,18 +61,6 @@ enum WriteFileState {
     Finalizing,
     /// The request body is complete; the response has not yet been read.
     Closed,
-}
-
-/// The message identifier and first attachment URL returned by an upload.
-///
-/// Serialize this value with Serde to persist its `id` and `url` fields.
-/// The fields are private; this crate currently provides no download operation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct WrittenFile {
-    /// Identifier of the webhook message containing the attachment.
-    id: String,
-    /// Attachment URL from the webhook response.
-    url: String,
 }
 
 /// Upload settings used by [`WriteFile::open`].
@@ -232,12 +220,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
     /// and response size limits. [`crate::Error::HttpStatus`] retains unsuccessful
     /// statuses and their decoded response bodies. [`crate::Error::InvalidResponse`]
     /// identifies missing or incorrectly typed JSON fields.
+    /// [`crate::Error::InvalidDiscordFileUrl`] identifies an invalid attachment URL.
     ///
     /// An error may leave the request or response incomplete, particularly for
     /// [`crate::Error::IoError`]. Some errors occur after the complete response
     /// has been read, but an `Err` does not guarantee that the connection is
     /// reusable. Discard a retained connection after any error.
-    pub async fn finish(mut self) -> Result<WrittenFile> {
+    pub async fn finish(mut self) -> Result<DiscordFile> {
         // Send the multipart boundary and final chunk before reading the response.
         self.close().await?;
 
@@ -287,9 +276,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
         }
         let url = response_field(attachment, "url", "attachments[0].url")?;
         let url = response_string(url, "attachments[0].url")?;
-        Ok(WrittenFile {
+        Ok(DiscordFile {
             id: id.to_string(),
-            url: url.to_string(),
+            url: DiscordFileUrl::parse(url)?,
         })
     }
 }

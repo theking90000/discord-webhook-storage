@@ -47,8 +47,10 @@ where
 - **`close().await`** finishes the request body without checking whether Discord
   accepted the upload.
 - **`finish().await`** closes the file if needed, checks Discord's
-  response, and returns a `WrittenFile` (Serde-serializable) containing the
-  message `id` and the attachment `url`.
+  response, and returns a Serde-serializable `DiscordFile` containing the
+  message `id` and a structured `DiscordFileUrl` in `url`. The latter stores
+  `channel_id`, `attachment_id`, `attachment_name`, `ex`, `is`, and `hm`.
+  `DiscordFileUrl::parse()` parses an attachment URL, and `to_string()` rebuilds it.
 
 By default, the file is named `file.bin` and may be up to 20,000,000 bytes. A
 write that would exceed this limit fails without sending any data. Discord may

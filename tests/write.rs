@@ -405,7 +405,7 @@ fn flush_and_transport_errors_are_reported() {
 
 #[test]
 fn finish_releases_connection_for_another_upload() {
-    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.example/file"}]}"#;
+    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.discordapp.com/attachments/123/456/file.bin?ex=6abe3fd5&is=6abcee55&hm=aabbcc"}]}"#;
     let mut transport = Transport::new(response("200 OK", body));
     transport.0.borrow_mut().require_complete_request = true;
 
@@ -415,7 +415,17 @@ fn finish_releases_connection_for_another_upload() {
         let result = block_on(file.finish()).unwrap();
         assert_eq!(
             serde_json::to_value(result).unwrap(),
-            json!({"id":"message-1","url":"https://cdn.example/file"})
+            json!({
+                "id": "message-1",
+                "url": {
+                    "channel_id": 123,
+                    "attachment_id": 456,
+                    "attachment_name": "file.bin",
+                    "ex": 0x6abe3fd5_u64,
+                    "is": 0x6abcee55_u64,
+                    "hm": "aabbcc"
+                }
+            })
         );
         let request = transport.written();
         let (_, multipart) = decode_request(&request);
@@ -432,7 +442,7 @@ fn finish_releases_connection_for_another_upload() {
 
 #[test]
 fn finish_reads_fragmented_success_response() {
-    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.example/file"}]}"#;
+    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.discordapp.com/attachments/123/456/file.bin?ex=6abe3fd5&is=6abcee55&hm=aabbcc"}]}"#;
     for read_size in [1, 7, 1024] {
         let transport = Transport::new(response("200 OK", body));
         transport.0.borrow_mut().max_read = read_size;
@@ -441,14 +451,24 @@ fn finish_reads_fragmented_success_response() {
         let result = block_on(file.finish()).unwrap();
         assert_eq!(
             serde_json::to_value(result).unwrap(),
-            json!({"id":"message-1","url":"https://cdn.example/file"})
+            json!({
+                "id": "message-1",
+                "url": {
+                    "channel_id": 123,
+                    "attachment_id": 456,
+                    "attachment_name": "file.bin",
+                    "ex": 0x6abe3fd5_u64,
+                    "is": 0x6abcee55_u64,
+                    "hm": "aabbcc"
+                }
+            })
         );
     }
 }
 
 #[test]
 fn finish_completes_request_before_reading_response() {
-    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.example/file"}]}"#;
+    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.discordapp.com/attachments/123/456/file.bin?ex=6abe3fd5&is=6abcee55&hm=aabbcc"}]}"#;
     for write_size in [1, 3, usize::MAX] {
         let transport = Transport::new(response("200 OK", body));
         {
@@ -532,7 +552,7 @@ fn chunked_response(encoded: &[u8]) -> Vec<u8> {
 
 #[test]
 fn finish_decodes_fragmented_chunks_extensions_and_trailers_without_eof() {
-    let json_body = br#"{"id":"message-1","attachments":[{"url":"https://cdn.example/file"}]}"#;
+    let json_body = br#"{"id":"message-1","attachments":[{"url":"https://cdn.discordapp.com/attachments/123/456/file.bin?ex=6abe3fd5&is=6abcee55&hm=aabbcc"}]}"#;
     for with_trailers in [false, true] {
         let mut encoded = Vec::new();
         for chunk in json_body.chunks(11) {
@@ -557,7 +577,17 @@ fn finish_decodes_fragmented_chunks_extensions_and_trailers_without_eof() {
             let result = block_on(opened(&mut transport.clone()).finish()).unwrap();
             assert_eq!(
                 serde_json::to_value(result).unwrap(),
-                json!({"id":"message-1","url":"https://cdn.example/file"})
+                json!({
+                "id": "message-1",
+                "url": {
+                    "channel_id": 123,
+                    "attachment_id": 456,
+                    "attachment_name": "file.bin",
+                    "ex": 0x6abe3fd5_u64,
+                    "is": 0x6abcee55_u64,
+                    "hm": "aabbcc"
+                }
+            })
             );
             let state = transport.0.borrow();
             assert_eq!(state.read_at, state.response.len());
@@ -567,7 +597,7 @@ fn finish_decodes_fragmented_chunks_extensions_and_trailers_without_eof() {
 
 #[test]
 fn finish_limits_decoded_chunked_body_size() {
-    let json_body = r#"{"id":"x","attachments":[{"url":"x"}]}"#;
+    let json_body = r#"{"id":"x","attachments":[{"url":"https://cdn.discordapp.com/attachments/123/456/file.bin?ex=6abe3fd5&is=6abcee55&hm=aabbcc"}]}"#;
     let body = format!("{json_body}{}", " ".repeat(16384 - json_body.len()));
     let encoded = format!("4000\r\n{body}\r\n0\r\n\r\n");
     let transport = Transport::new(chunked_response(encoded.as_bytes()));
@@ -779,4 +809,16 @@ fn credentials_distinguish_empty_and_missing_parts_without_exposing_tokens() {
         assert!(!format!("{error:?}: {error}").contains("secret-token"));
         assert!(matches!(error, Error::InvalidWebhookUrl(actual) if actual == expected));
     }
+}
+
+#[test]
+fn finish_rejects_invalid_attachment_url() {
+    let body = r#"{"id":"message-1","attachments":[{"url":"https://cdn.example/file"}]}"#;
+    let transport = Transport::new(response("200 OK", body));
+    assert!(matches!(
+        block_on(opened(&mut transport.clone()).finish()),
+        Err(Error::InvalidDiscordFileUrl(
+            discord_webhook_storage::DiscordFileUrlError::InvalidPrefix
+        ))
+    ));
 }

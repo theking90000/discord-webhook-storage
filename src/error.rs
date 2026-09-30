@@ -1,6 +1,6 @@
 use std::{fmt, io, num::ParseIntError, str::Utf8Error};
 
-/// A failure while parsing credentials, sending an upload, or reading its response.
+/// A failure while parsing URLs, sending an upload, or reading its response.
 ///
 /// Transport and JSON errors retain their original causes through
 /// [`std::error::Error::source`]. HTTP syntax, unsuccessful statuses, invalid
@@ -10,6 +10,8 @@ use std::{fmt, io, num::ParseIntError, str::Utf8Error};
 pub enum Error {
     /// The webhook URL cannot provide an identifier and token.
     InvalidWebhookUrl(WebhookUrlError),
+    /// The attachment URL cannot provide the required structured fields.
+    InvalidDiscordFileUrl(DiscordFileUrlError),
     /// The transport failed, retaining its error kind and original cause.
     IoError(io::Error),
     /// Request serialization or response JSON decoding failed.
@@ -44,6 +46,29 @@ pub enum WebhookUrlError {
     EmptyId,
     /// The webhook token is empty.
     EmptyToken,
+}
+
+/// The reason an attachment URL was rejected, without retaining its signature.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DiscordFileUrlError {
+    /// The URL does not start with `https://cdn.discordapp.com/attachments/`.
+    InvalidPrefix,
+    /// A required path segment or query parameter is absent.
+    MissingField {
+        /// Name of the missing field.
+        field: &'static str,
+    },
+    /// A field is empty, malformed, or outside the range of `u64`.
+    InvalidField {
+        /// Name of the invalid field.
+        field: &'static str,
+    },
+    /// A signing query parameter occurs more than once.
+    DuplicateParameter {
+        /// Name of the repeated parameter.
+        field: &'static str,
+    },
 }
 
 /// The part of an HTTP response involved in a shared parsing failure.
@@ -200,6 +225,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidWebhookUrl(error) => write!(f, "invalid webhook URL: {error}"),
+            Self::InvalidDiscordFileUrl(error) => write!(f, "invalid attachment URL: {error}"),
             Self::IoError(error) => write!(f, "transport I/O failed: {error}"),
             Self::JsonError(error) => write!(f, "JSON encoding or decoding failed: {error}"),
             Self::HttpParseError(error) => write!(f, "invalid HTTP response: {error}"),
@@ -220,6 +246,19 @@ impl fmt::Display for WebhookUrlError {
             Self::EmptyId => "empty webhook identifier",
             Self::EmptyToken => "empty webhook token",
         })
+    }
+}
+
+impl fmt::Display for DiscordFileUrlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPrefix => {
+                f.write_str("expected https://cdn.discordapp.com/attachments/ prefix")
+            }
+            Self::MissingField { field } => write!(f, "missing field {field}"),
+            Self::InvalidField { field } => write!(f, "invalid field {field}"),
+            Self::DuplicateParameter { field } => write!(f, "repeated query parameter {field}"),
+        }
     }
 }
 
@@ -357,6 +396,12 @@ impl From<WebhookUrlError> for Error {
     }
 }
 
+impl From<DiscordFileUrlError> for Error {
+    fn from(error: DiscordFileUrlError) -> Self {
+        Self::InvalidDiscordFileUrl(error)
+    }
+}
+
 impl From<WriteError> for Error {
     fn from(error: WriteError) -> Self {
         Self::WriteError(error)
@@ -379,6 +424,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidWebhookUrl(error) => Some(error),
+            Self::InvalidDiscordFileUrl(error) => Some(error),
             Self::IoError(error) => Some(error),
             Self::JsonError(error) => Some(error),
             Self::HttpParseError(error) => Some(error),
@@ -405,8 +451,9 @@ impl std::error::Error for HttpError {
 }
 
 impl std::error::Error for WebhookUrlError {}
+impl std::error::Error for DiscordFileUrlError {}
 impl std::error::Error for ResponseError {}
 impl std::error::Error for WriteError {}
 
-/// A result returned by webhook credential parsing and upload operations.
+/// A result returned by URL parsing and upload operations.
 pub type Result<T> = std::result::Result<T, Error>;
