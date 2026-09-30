@@ -61,7 +61,7 @@ pub struct DiscordFileUrl {
     pub attachment_id: u64,
     /// Attachment name, preserving its URL percent encoding.
     pub attachment_name: String,
-    /// Hexadecimal `ex` query parameter parsed as an integer.
+    /// Expiration Unix timestamp in seconds, parsed from the hexadecimal `ex` parameter.
     pub ex: u64,
     /// Hexadecimal `is` query parameter parsed as an integer.
     pub is: u64,
@@ -70,6 +70,15 @@ pub struct DiscordFileUrl {
 }
 
 impl DiscordFileUrl {
+    /// Return whether the current Unix timestamp is before `ex`.
+    ///
+    /// Returns `false` if the system clock is before the Unix epoch.
+    pub fn is_valid(&self) -> bool {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .is_ok_and(|now| now.as_secs() < self.ex)
+    }
+
     /// Parse `https://cdn.discordapp.com/attachments/<channel>/<attachment>/<name>`
     /// followed by the required `ex`, `is`, and `hm` query parameters.
     ///
