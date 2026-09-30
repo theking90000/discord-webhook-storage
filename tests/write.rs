@@ -294,8 +294,22 @@ fn open_retries_partial_transport_writes() {
 fn file_limit_applies_to_scalar_and_vectored_writes() {
     let transport = Transport::new(Vec::new());
     let mut file = opened(&transport);
-    let large = vec![7; 20_000_000];
+    let large = vec![7; 19_999_997];
     block_on(file.write_all(&large)).unwrap();
+    let before = transport.written().len();
+    let expected = WriteError::PayloadLimitExceeded { remaining: 3, attempted: 4 };
+    assert_write_rejection(block_on(file.write(&[1, 2, 3, 4])).unwrap_err(), expected);
+    assert_write_rejection(
+        block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3, 4])]))
+            .unwrap_err(),
+        expected,
+    );
+    assert_eq!(transport.written().len(), before);
+
+    assert_eq!(
+        block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3])])).unwrap(),
+        3
+    );
     let before = transport.written().len();
     let expected = WriteError::PayloadLimitExceeded { remaining: 0, attempted: 1 };
     assert_write_rejection(block_on(file.write(&[1])).unwrap_err(), expected);
@@ -304,14 +318,41 @@ fn file_limit_applies_to_scalar_and_vectored_writes() {
         expected,
     );
     assert_eq!(transport.written().len(), before);
+}
 
-    let transport = Transport::new(Vec::new());
-    let mut file = opened(&transport);
-    assert_eq!(
-        block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3])])).unwrap(),
-        2
-    );
-    block_on(file.write_all(&[4])).unwrap();
+#[test]
+fn vectored_writes_preserve_payload_with_partial_transport_writes() {
+    for max_write in [1, 3, 4, 6, usize::MAX] {
+        let transport = Transport::new(Vec::new());
+        let mut file = opened(&transport);
+        {
+            let mut state = transport.0.borrow_mut();
+            state.max_write = max_write;
+            state.pending_writes = true;
+        }
+        assert_eq!(
+            block_on(file.write_vectored(&[IoSlice::new(&[1, 2]), IoSlice::new(&[3])]))
+                .unwrap(),
+            3
+        );
+        block_on(file.write_all(&[4])).unwrap();
+        block_on(file.close()).unwrap();
+
+        let request = transport.written();
+        let (headers, body) = decode_request(&request);
+        let boundary = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Type: multipart/form-data; boundary="))
+            .unwrap();
+        let file_header = b"filename=\"file.bin\"\r\n\r\n";
+        let payload_start = body.windows(file_header.len())
+            .position(|window| window == file_header).unwrap() + file_header.len();
+        let expected = [
+            &[1, 2, 3, 4][..],
+            format!("\r\n--{boundary}--\r\n").as_bytes(),
+        ].concat();
+        assert_eq!(&body[payload_start..], expected, "max_write={max_write}");
+    }
 }
 
 #[test]
