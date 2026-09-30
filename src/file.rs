@@ -1,24 +1,29 @@
 use crate::{DiscordFileUrlError, Error, Result};
 
-/// A message identifier and its parsed attachment URL.
+/// A reference to a file stored on Discord.
 ///
-/// Serialize this value with Serde to persist the message and attachment fields.
+/// Returned by [`crate::WriteFile::finish`] and accepted by
+/// [`crate::ReadFile::open`]. Use Serde to save this reference, or
+/// [`ToString::to_string`] to obtain a `discord://<id>/<url>` string.
+/// The download URL expires even if the reference is saved.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiscordFile {
-    /// Identifier of the message containing the attachment.
+    /// Identifier of the Discord message that stores the file.
     pub id: String,
-    /// Parsed attachment URL.
+    /// Download URL for the file, including its expiration time.
     pub url: DiscordFileUrl,
 }
 
 impl DiscordFile {
-    /// Parse `discord://<id>/<url>`, preserving the complete attachment URL.
+    /// Read a file reference saved as a `discord://<id>/<url>` string.
+    ///
+    /// This checks the format without contacting Discord or checking expiration.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDiscordFileUrl`] for an invalid prefix, an empty
-    /// identifier, reserved or whitespace characters in the identifier, or an
-    /// invalid attachment URL. Errors do not retain the input.
+    /// Returns [`Error::InvalidDiscordFileUrl`] if the string has the wrong
+    /// format, an invalid message identifier, or an invalid download URL.
+    /// The error does not contain the input string.
     pub fn parse(value: &str) -> Result<Self> {
         let file = value
             .strip_prefix("discord://")
@@ -55,29 +60,34 @@ impl AsRef<DiscordFileUrl> for DiscordFile {
     }
 }
 
-/// Owned fields parsed from a signed Discord CDN attachment URL.
+/// A temporary URL for downloading a stored file.
 ///
-/// Formatting reconstructs the URL with query parameters ordered as `ex`, `is`,
-/// and `hm`. Additional query parameters are ignored during parsing.
+/// Pass it to [`crate::ReadFile::open`] to read the file. Use [`Self::is_valid`]
+/// to check whether it has expired, or [`ToString::to_string`] to obtain the URL.
+/// Serde serialization saves the URL fields without extending its lifetime.
+///
+/// Only the file path and the `ex`, `is`, and `hm` URL parameters are kept.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiscordFileUrl {
-    /// Identifier of the channel containing the attachment.
+    /// Identifier of the Discord channel that stores the file.
     pub channel_id: u64,
-    /// Identifier of the attachment.
+    /// Identifier of the file attachment in Discord.
     pub attachment_id: u64,
-    /// Attachment name, preserving its URL percent encoding.
+    /// File name as it appears in the URL, with characters such as spaces still encoded.
     pub attachment_name: String,
-    /// Expiration Unix timestamp in seconds, parsed from the hexadecimal `ex` parameter.
+    /// Download URL expiration time, in seconds since the Unix epoch.
     pub ex: u64,
-    /// Hexadecimal `is` query parameter parsed as an integer.
+    /// Value of the `is` URL parameter required by Discord, stored as an integer.
     pub is: u64,
-    /// Hexadecimal `hm` query parameter, preserving its original spelling.
+    /// Signature in the `hm` URL parameter required by Discord.
     pub hm: String,
 }
 
 impl DiscordFileUrl {
-    /// Return whether the current Unix timestamp is before `ex`.
+    /// Check whether the download URL has not yet expired.
     ///
+    /// Uses the local clock without contacting Discord. A `true` result does
+    /// not guarantee that the file still exists or can be downloaded.
     /// Returns `false` if the system clock is before the Unix epoch.
     pub fn is_valid(&self) -> bool {
         std::time::SystemTime::now()
@@ -85,13 +95,17 @@ impl DiscordFileUrl {
             .is_ok_and(|now| now.as_secs() < self.ex)
     }
 
-    /// Parse `https://cdn.discordapp.com/attachments/<channel>/<attachment>/<name>`
-    /// followed by the required `ex`, `is`, and `hm` query parameters.
+    /// Read a file download URL provided by Discord.
+    ///
+    /// The URL must start with `https://cdn.discordapp.com/attachments/` and
+    /// include the `ex`, `is`, and `hm` parameters. This checks the format
+    /// without contacting Discord or checking expiration.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDiscordFileUrl`] for an invalid prefix, missing or
-    /// invalid fields, or repeated signing parameters. Errors do not retain the URL.
+    /// Returns [`Error::InvalidDiscordFileUrl`] if the URL has the wrong format,
+    /// lacks required details, or repeats a required parameter. The error does
+    /// not contain the URL.
     pub fn parse(url: &str) -> Result<Self> {
         let attachment = url
             .strip_prefix("https://cdn.discordapp.com/attachments/")

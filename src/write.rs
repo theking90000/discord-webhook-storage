@@ -18,31 +18,25 @@ const DISCORD_PAYLOAD_LIMIT: usize = 20_000_000;
 // Bound the decoded JSON response before allocating its body.
 const MAX_RESPONSE_BODYSIZE: usize = 16384;
 
-/// An open file upload implementing [`AsyncWrite`].
+/// A file opened for asynchronous writing to Discord.
 ///
-/// Each write sends file bytes in an HTTP chunk. Writes that exceed the remaining
-/// payload allowance fail before sending any bytes from that call with
-/// [`std::io::ErrorKind::InvalidInput`]. Writes after closing starts return
-/// [`std::io::ErrorKind::BrokenPipe`]. Both retain a typed [`Error::WriteError`]
-/// available through [`std::io::Error::get_ref`].
-/// [`AsyncWriteExt::flush`] drains buffered bytes without finishing the upload.
-/// [`AsyncWriteExt::close`] finishes the request body and keeps the transport open
-/// so that [`Self::finish`] can read the response.
+/// Write its contents with the standard [`AsyncWrite`] operations, then call
+/// [`Self::finish`] to confirm that Discord stored the file and obtain its
+/// reference. Writing all bytes or calling [`AsyncWriteExt::close`] alone does
+/// not confirm success. Dropping the file does not complete the upload.
 ///
-/// Completing [`AsyncWriteExt::write_all`] does not guarantee that the server
-/// has received all file bytes. Buffered bytes may be sent later, but waiting
-/// for a fixed delay provides no completion guarantee. Only [`Self::finish`]
-/// returning `Ok` confirms that the complete upload succeeded and returns its
-/// message identifier and attachment URL.
-/// Dropping the writer does not complete the upload.
+/// [`AsyncWriteExt::flush`] sends any buffered bytes without finishing the file.
+/// [`AsyncWriteExt::close`] ends writing, after which [`Self::finish`] can still
+/// confirm the upload. A write that would exceed the file size limit fails with
+/// [`std::io::ErrorKind::InvalidInput`] without accepting any bytes from that
+/// call. Writing after closing starts returns [`std::io::ErrorKind::BrokenPipe`].
+/// See [`WriteError`] for details on these write failures.
 ///
-/// The transport must already be connected to `discord.com:443` over TCP with
-/// the TLS handshake complete. Uploads use HTTP/1.1 keep-alive; neither closing
-/// the writer nor finishing the upload explicitly closes the transport.
-/// Pass `&mut connection` to [`Self::open`] to borrow the connection until the
-/// writer is finished or dropped.
-/// Only reuse it after [`Self::finish`] returns `Ok`, provided the server keeps
-/// it open. After an error, discard it because reuse is not guaranteed.
+/// The caller supplies a secure connection to `discord.com:443` using HTTP/1.1.
+/// Pass `&mut connection` to keep ownership of it. Reuse it only after
+/// [`Self::finish`] succeeds and if it is still open. Discard it after an error
+/// or an interrupted upload. Passing a connection by value makes the file own
+/// it and drop it when the file is finished or dropped.
 pub struct WriteFile<T> {
     connection: ChunkWriter<T>,
     boundary: String,
@@ -62,10 +56,10 @@ enum WriteFileState {
     Closed,
 }
 
-/// Upload settings used by [`WriteFile::open`].
+/// Settings for creating a file with [`WriteFile::open`].
 ///
-/// [`Default`] uses the filename `file.bin` and a payload limit of 20,000,000 bytes.
-/// The fields are private and currently have no public setters.
+/// Use [`WriteConfig::default`] for a file named `file.bin` with a maximum size
+/// of 20,000,000 bytes. These settings cannot currently be customized.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriteConfig {
     /// Filename sent in the JSON metadata and multipart headers.
@@ -112,24 +106,19 @@ fn generate_boundary() -> String {
 }
 
 impl<T: AsyncWrite + Unpin> WriteFile<T> {
-    /// Start an upload using an established TCP+TLS connection to `discord.com:443`.
+    /// Create a new file for writing through the selected Discord webhook.
     ///
-    /// Sends the HTTP request headers, JSON metadata, and multipart file headers.
-    /// `connection` must already be connected over TCP with the TLS handshake
-    /// complete. The caller supplies a transport implementing the `futures` I/O traits.
-    /// This method does not establish a connection or perform a TLS handshake.
+    /// `credentials` selects where to store the file. `config` specifies its
+    /// name and maximum size. Discord assigns the file reference when
+    /// [`Self::finish`] succeeds.
     ///
-    /// `credentials` selects the webhook, and `config` sets the file metadata and
-    /// payload allowance. Pass `&mut connection` to borrow the connection and
-    /// retain ownership of it. It can be reused after a successful
-    /// [`Self::finish`], provided the server keeps it open. HTTP/1.1 keep-alive
-    /// is used without explicitly closing the underlying transport.
-    /// Passing an owned transport instead moves it into the writer.
+    /// Supply an already connected secure connection to `discord.com:443` as
+    /// described in [`WriteFile`]. Pass `&mut connection` to keep ownership of it.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::IoError`] for transport failures or
-    /// [`crate::Error::JsonError`] if serializing the request metadata fails.
+    /// Returns [`Error::IoError`] if the connection fails, or
+    /// [`Error::JsonError`] if the file settings cannot be sent to Discord.
     pub async fn open(
         mut connection: T,
         credentials: &WebhookCredentials<'_>,
@@ -197,34 +186,27 @@ impl<T: AsyncWrite + Unpin> WriteFile<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WriteFile<T> {
-    /// Complete the upload and read its message identifier and attachment URL.
+    /// Finish writing and return a reference to the stored file.
     ///
-    /// Closes the request body if needed, then reads an HTTP/1.1 response with
-    /// `Content-Length` or chunked transfer encoding. The decoded response body
-    /// must fit within 16 KiB. This consumes the writer without explicitly
-    /// closing the transport. If [`Self::open`] received `&mut connection`,
-    /// this releases the borrow without dropping the caller's connection.
-    /// An owned transport is dropped with the writer.
+    /// Success confirms that Discord accepted the complete file. Keep the
+    /// returned [`DiscordFile`] to open it for reading later. It supports Serde
+    /// serialization, though its download URL expires.
     ///
-    /// On `Ok`, Discord has accepted the complete upload, the complete response
-    /// has been read, and the connection can be reused if the server keeps it
-    /// open. Calling [`AsyncWriteExt::close`] alone
-    /// leaves the response unread and is insufficient for reuse.
+    /// This consumes the writer and closes it if needed. If opening received
+    /// `&mut connection`, the connection becomes available for reuse on success,
+    /// if it is still open. A connection passed by value is dropped.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::IoError`] for transport failures and
-    /// [`crate::Error::JsonError`] for invalid response JSON.
-    /// [`crate::Error::HttpParseError`] details malformed HTTP, unsupported framing,
-    /// and response size limits. [`crate::Error::HttpStatus`] retains unsuccessful
-    /// statuses and their decoded response bodies. [`crate::Error::InvalidResponse`]
-    /// identifies missing or incorrectly typed JSON fields.
-    /// [`crate::Error::InvalidDiscordFileUrl`] identifies an invalid attachment URL.
+    /// Returns [`Error::IoError`] if the connection fails, or
+    /// [`Error::HttpStatus`] if Discord rejects the upload.
     ///
-    /// An error may leave the request or response incomplete, particularly for
-    /// [`crate::Error::IoError`]. Some errors occur after the complete response
-    /// has been read, but an `Err` does not guarantee that the connection is
-    /// reusable. Discard a retained connection after any error.
+    /// An unreadable response returns [`Error::HttpParseError`] or
+    /// [`Error::JsonError`]. Missing or invalid file details return
+    /// [`Error::InvalidResponse`] or [`Error::InvalidDiscordFileUrl`]. The
+    /// response is limited to 16 KiB.
+    ///
+    /// Discard a retained connection after any error.
     pub async fn finish(mut self) -> Result<DiscordFile> {
         // Send the multipart boundary and final chunk before reading the response.
         self.close().await?;

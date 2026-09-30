@@ -11,22 +11,20 @@ use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 const MAX_ERROR_BODY_SIZE: usize = 16384;
 
-/// An open attachment download implementing [`AsyncRead`].
+/// A file opened for asynchronous reading from Discord.
 ///
-/// Reads stop at the response's `Content-Length`, returning EOF without waiting
-/// for the server to close the connection. A transport EOF before that length
-/// returns [`io::ErrorKind::UnexpectedEof`]. Transport errors pass through unchanged.
+/// Use the standard [`AsyncRead`] operations to read its contents. Reading
+/// returns zero bytes at the end of the file or the selected range. If the
+/// download stops early, reading returns [`io::ErrorKind::UnexpectedEof`].
 ///
-/// The transport must already be connected to `cdn.discordapp.com:443` over TCP
-/// with the TLS handshake complete, using HTTP/1.1. Pass `&mut connection` to
-/// [`Self::open`] to retain ownership of the connection. After reading the entire
-/// body, drop the reader to release the borrow. The connection can then be reused
-/// if the server keeps it open. An owned connection is dropped with the reader.
+/// The caller supplies a secure connection to `cdn.discordapp.com:443` using
+/// HTTP/1.1. Pass `&mut connection` to keep ownership of it. After reading to
+/// the end, drop the file before reusing the connection, if it is still open.
+/// A connection passed by value is dropped with the file.
 ///
-/// Dropping the reader does not drain unread bytes. If it is dropped before the
-/// complete body is read, discard the connection. Unread response bytes would
-/// otherwise be mistaken for the next response. Also discard it after any I/O
-/// or opening error, or if opening is cancelled after sending the request.
+/// Discard a retained connection after an error or an interrupted download.
+/// This includes dropping the file before reading to the end, or cancelling
+/// opening after it has started sending the request.
 pub struct ReadFile<T> {
     connection: T,
     buffered: Vec<u8>,
@@ -35,13 +33,13 @@ pub struct ReadFile<T> {
 }
 
 impl<T: AsyncWrite + AsyncRead + Unpin> ReadFile<T> {
-    /// Send a GET request with `Range: bytes=0-` and read the response headers.
+    /// Open a stored file for reading from the beginning.
     ///
-    /// `url` accepts [`DiscordFileUrl`] or [`crate::DiscordFile`], including their
-    /// references, through [`AsRef`]. This borrows the URL during opening without
-    /// retaining it in the reader. `connection` uses the `futures` I/O traits and
-    /// must already be connected with TLS to `cdn.discordapp.com:443`.
-    /// See [`Self::open_with_range`] for response handling and errors.
+    /// `url` can be a [`crate::DiscordFile`], a [`DiscordFileUrl`], or a reference
+    /// to either. It does not need to remain alive after opening.
+    ///
+    /// Supply a secure connection to `cdn.discordapp.com:443` as described in
+    /// [`ReadFile`]. Use [`Self::open_with_range`] to read only part of the file.
     ///
     /// # Errors
     ///
@@ -50,26 +48,29 @@ impl<T: AsyncWrite + AsyncRead + Unpin> ReadFile<T> {
         Self::open_with_range(connection, url, 0, None).await
     }
 
-    /// Send a GET request for `start` through the inclusive `end` byte offset.
+    /// Open a stored file for reading a selected range of bytes.
     ///
-    /// `None` requests every byte from `start` to the end of the file. A supplied
-    /// `end` must be greater than `start`. Sends `Range: bytes=start-end`, or
-    /// `Range: bytes=start-` for `None`, then flushes the request and parses the
-    /// response headers before returning the reader.
+    /// `start` is the first byte offset, counting from zero. `end` is the last
+    /// byte offset to include, and must be greater than `start`. Pass `None` to
+    /// read from `start` to the end of the file.
     ///
-    /// Accepts HTTP 206, or HTTP 200 for `start = 0` and `end = None` if the server
-    /// ignores the full-file range. Successful responses require `Content-Length`.
-    /// The reader retains any body bytes already read with the headers.
+    /// `url` accepts the same file references as [`Self::open`]. Supply a secure
+    /// connection to `cdn.discordapp.com:443` as described in [`ReadFile`].
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDiscordFileUrl`] if [`DiscordFileUrl::is_valid`]
-    /// is false, [`Error::InvalidRange`] if `start >= end`, [`Error::IoError`]
-    /// for transport failures, or [`Error::HttpParseError`] for response parsing
-    /// or framing failures. Unexpected statuses return [`Error::HttpStatus`]
-    /// with the response body if it can be decoded within 16 KiB; otherwise
-    /// returns the body parsing or transport error. Discard the connection after
-    /// an opening error that occurs after the request has been sent.
+    /// Returns [`Error::InvalidDiscordFileUrl`] if the file URL is invalid or
+    /// expired, or the system clock cannot be checked. Returns
+    /// [`Error::InvalidRange`] if a supplied `end` is not greater than `start`.
+    /// Connection failures return [`Error::IoError`].
+    ///
+    /// Returns [`Error::HttpStatus`] if Discord rejects the download, or
+    /// [`Error::HttpParseError`] if its response cannot be read. Error responses
+    /// are limited to 16 KiB. Discard the connection if opening fails after
+    /// sending the request.
+    ///
+    /// The download requires HTTP 206, or HTTP 200 when reading the whole file,
+    /// and a `Content-Length` header.
     pub async fn open_with_range(
         mut connection: T,
         url: impl AsRef<DiscordFileUrl>,

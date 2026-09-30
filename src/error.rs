@@ -1,47 +1,48 @@
 use std::{fmt, io, num::ParseIntError, str::Utf8Error};
 
-/// A failure while parsing URLs, uploading, or downloading a file.
+/// An error while opening, writing, finishing, or reading a file.
 ///
-/// Transport and JSON errors retain their original causes through
-/// [`std::error::Error::source`]. HTTP syntax, unsuccessful statuses, invalid
-/// response fields, and rejected writes have separate variants.
+/// Match the variants to distinguish invalid file references, connection
+/// failures, and errors returned by Discord. Use [`std::error::Error::source`]
+/// to inspect the underlying cause when available.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// The webhook URL cannot provide an identifier and token.
+    /// The webhook URL is invalid or lacks the credentials needed to create a file.
     InvalidWebhookUrl(WebhookUrlError),
-    /// The attachment URL cannot provide the required structured fields.
+    /// The file reference or download URL is invalid or expired.
     InvalidDiscordFileUrl(DiscordFileUrlError),
-    /// The transport failed, retaining its error kind and original cause.
+    /// The connection failed. The original I/O error is available for inspection.
     IoError(io::Error),
-    /// Request serialization or response JSON decoding failed.
+    /// File settings could not be prepared, or Discord returned unreadable file details.
     JsonError(serde_json::Error),
-    /// The HTTP response cannot be parsed or decoded within its limits.
+    /// Discord's response is unreadable, unsupported, or too large.
     HttpParseError(HttpError),
-    /// Discord returned a status that the operation cannot accept.
+    /// Discord did not accept the file operation.
     HttpStatus {
         /// HTTP status code returned by Discord.
         status: u16,
-        /// Decoded response body, bounded by the response size limit.
+        /// Discord's error response, which may explain why the operation failed.
         ///
-        /// Kept as bytes because unsuccessful responses need not contain JSON
-        /// or valid UTF-8. Parse it with Serde to inspect Discord error details.
+        /// This may contain JSON, text, or other bytes. It is limited to 16 KiB.
         body: Vec<u8>,
     },
-    /// Valid JSON does not contain the required upload result fields.
+    /// Discord's response lacks valid details for the uploaded file.
     InvalidResponse(ResponseError),
-    /// A write was rejected before accepting any bytes from that call.
+    /// A write failed without accepting any bytes from that call.
     WriteError(WriteError),
-    /// The requested byte range does not have `start < end`.
+    /// The requested last byte offset is not greater than the first.
     InvalidRange {
         /// First requested byte offset.
         start: usize,
-        /// Inclusive last requested byte offset.
+        /// Last requested byte offset, included in the range.
         end: usize,
     },
 }
 
-/// The reason a webhook URL was rejected, without retaining its secret token.
+/// Why a webhook URL cannot be used to create files.
+///
+/// These errors do not contain the webhook's secret token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum WebhookUrlError {
@@ -55,152 +56,159 @@ pub enum WebhookUrlError {
     EmptyToken,
 }
 
-/// The reason an attachment URL was rejected, without retaining its signature.
+/// Why a file reference or download URL cannot be used.
+///
+/// These errors do not contain the download URL's signature.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DiscordFileUrlError {
-    /// The signed attachment URL has expired or the system clock is invalid.
+    /// The download URL has expired, or the local clock cannot be checked.
     Expired,
     /// The URL does not start with `https://cdn.discordapp.com/attachments/`.
     InvalidPrefix,
-    /// A required path segment or query parameter is absent.
+    /// The file reference or URL lacks a required value.
     MissingField {
         /// Name of the missing field.
         field: &'static str,
     },
-    /// A field is empty, malformed, or outside the range of `u64`.
+    /// A value in the file reference or URL is invalid.
     InvalidField {
         /// Name of the invalid field.
         field: &'static str,
     },
-    /// A signing query parameter occurs more than once.
+    /// A required URL parameter appears more than once.
     DuplicateParameter {
         /// Name of the repeated parameter.
         field: &'static str,
     },
 }
 
-/// The part of an HTTP response involved in a shared parsing failure.
+/// The part of Discord's response that could not be read.
+///
+/// These details help diagnose an unreadable response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum HttpPart {
-    /// The HTTP version, status code, and reason phrase.
+    /// The first line, which reports the result of the operation.
     StatusLine,
-    /// A response header line.
+    /// One line of information about the response, such as its size.
     HeaderLine,
-    /// A chunk size and its optional extensions.
+    /// A line declaring the size of a piece of the response.
     ChunkSizeLine,
-    /// A single trailer header line.
+    /// One line of additional information after the response contents.
     TrailerLine,
-    /// The complete trailer section.
+    /// All additional information after the response contents.
     Trailers,
 }
 
-/// A failure in HTTP response syntax, framing, or size limits.
+/// Why Discord's response could not be read.
+///
+/// Returned through [`Error::HttpParseError`]. These details describe the
+/// server response rather than the contents of the stored file.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HttpError {
-    /// A line ended prematurely because the connection reached EOF.
+    /// The connection ended before a response line was complete.
     UnexpectedEof {
         /// The part of the response being read.
         part: HttpPart,
     },
-    /// Response metadata contains invalid UTF-8.
+    /// Text describing the response cannot be read as UTF-8.
     InvalidUtf8 {
-        /// The part of the response being decoded.
+        /// The part of the response being read.
         part: HttpPart,
         /// Original UTF-8 decoding error.
         source: Utf8Error,
     },
-    /// The status line does not start with the supported `HTTP/1.1` version.
+    /// The server used an unsupported HTTP version. HTTP/1.1 is required.
     UnsupportedHttpVersion,
-    /// The status line lacks a separator between the code and reason phrase.
+    /// The first response line has an invalid format.
     MalformedStatusLine,
-    /// The status code is not three digits between 100 and 599.
+    /// The server returned an invalid HTTP status code.
     InvalidStatusCode {
         /// Value received from the server.
         value: String,
-        /// Integer parsing error, if parsing failed before validating the code.
+        /// Underlying error, if the value could not be read as a number.
         source: Option<ParseIntError>,
     },
-    /// A Content-Length value could not be parsed as a byte count.
+    /// The server declared an invalid response size in `Content-Length`.
     InvalidContentLength {
         /// Value received from the server.
         value: String,
         /// Original integer parsing error.
         source: ParseIntError,
     },
-    /// A header line lacks a colon separator.
+    /// A line describing the response has an invalid format.
     MalformedHeader,
-    /// Multiple Content-Length headers disagree.
+    /// The server declared different sizes for the same response.
     ConflictingContentLength {
         /// First declared length.
         first: usize,
         /// Conflicting declared length.
         second: usize,
     },
-    /// Both Content-Length and Transfer-Encoding were specified.
+    /// The server gave conflicting instructions for reading the response.
     ConflictingBodyFraming,
-    /// A transfer encoding other than a single `chunked` header was received.
+    /// The server used an unsupported way to send the response contents.
     UnsupportedTransferEncoding {
         /// Rejected Transfer-Encoding header value.
         value: String,
     },
-    /// Neither Content-Length nor chunked transfer encoding was specified.
+    /// The server did not specify how to find the end of the response.
     MissingBodyFraming,
-    /// A streaming download does not declare Content-Length.
+    /// The server did not declare the size of the file download.
     MissingContentLength,
-    /// The chunk size has invalid syntax or cannot fit in `usize`.
+    /// The server declared an invalid size for a piece of the response.
     InvalidChunkSize {
-        /// Rejected chunk size line, including any extensions.
+        /// Line containing the invalid size.
         value: String,
-        /// Integer parsing error, if the syntax was valid but parsing failed.
+        /// Underlying error, if the value could not be read as a number.
         source: Option<ParseIntError>,
     },
-    /// Chunk data is not followed by a CRLF delimiter.
+    /// A piece of the response lacks its required ending.
     InvalidChunkDelimiter,
-    /// A trailer lacks a colon separator or has an invalid name or value.
+    /// Additional information after the response contents has an invalid format.
     MalformedTrailer,
-    /// A chunk size or trailer line does not end with CRLF.
+    /// A response line has an invalid ending.
     InvalidLineEnding {
         /// The part of the response being read.
         part: HttpPart,
     },
-    /// The decoded response body would exceed its limit.
+    /// The server response is larger than the allowed limit.
     BodyTooLarge {
-        /// Maximum decoded body length in bytes.
+        /// Maximum allowed response size in bytes.
         limit: usize,
-        /// Announced total decoded length in bytes.
+        /// Total response size declared so far, in bytes.
         ///
         /// Saturates at `usize::MAX` if the announced total overflows.
         size: usize,
     },
-    /// Bytes already read exceed the declared Content-Length.
+    /// The server sent more response bytes than its declared size.
     UnexpectedBodyBytes {
-        /// Declared body length in bytes.
+        /// Declared response size in bytes.
         expected: usize,
-        /// Number of body bytes already received.
+        /// Number of response bytes already received.
         received: usize,
     },
-    /// Chunk framing or trailers exceed their metadata limit.
+    /// Information describing the response exceeds its size limit.
     MetadataTooLarge {
-        /// The metadata being read.
+        /// The part of the response being read.
         part: HttpPart,
         /// Maximum allowed size in bytes.
         limit: usize,
     },
 }
 
-/// A missing or incorrectly typed field in a successful JSON response.
+/// Why Discord's reply lacks usable details for an uploaded file.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ResponseError {
-    /// A required field or array element is absent.
+    /// A required file detail is missing.
     MissingField {
         /// JSON field path, such as `attachments[0].url`.
         field: &'static str,
     },
-    /// A required field has an unexpected JSON type.
+    /// A required file detail has the wrong type of value.
     InvalidFieldType {
         /// JSON field path.
         field: &'static str,
@@ -211,24 +219,27 @@ pub enum ResponseError {
     },
 }
 
-/// A local write rejection, also available inside an [`io::Error`].
+/// Why a write failed before accepting any bytes from that call.
 ///
-/// [`crate::WriteFile`] embeds [`Error::WriteError`] in the errors returned by
-/// [`futures::AsyncWrite`]. Use [`io::Error::get_ref`] and `downcast_ref::<Error>()`
-/// to inspect the rejection. Transport errors pass through unchanged.
+/// Writing beyond the file size limit returns [`io::ErrorKind::InvalidInput`].
+/// Writing after closing starts returns [`io::ErrorKind::BrokenPipe`].
+///
+/// To inspect these errors from [`crate::WriteFile`], use [`io::Error::get_ref`]
+/// and `downcast_ref::<Error>()`, then match [`Error::WriteError`]. Connection
+/// errors keep their original I/O error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum WriteError {
-    /// The write exceeds the remaining file payload allowance.
+    /// The write would exceed the file size limit.
     PayloadLimitExceeded {
-        /// Number of payload bytes still available.
+        /// Number of file bytes that can still be written.
         remaining: usize,
         /// Number of bytes supplied by the rejected call.
         attempted: usize,
     },
-    /// Closing has started, or the request body is already complete.
+    /// The file is closing or has already been closed for writing.
     NotWritable,
-    /// The combined size of vectored buffers overflows `usize`.
+    /// The total size of the supplied buffers cannot be represented by `usize`.
     SizeOverflow,
 }
 
@@ -473,5 +484,5 @@ impl std::error::Error for DiscordFileUrlError {}
 impl std::error::Error for ResponseError {}
 impl std::error::Error for WriteError {}
 
-/// A result returned by URL parsing, upload, and download operations.
+/// The result of a file operation or URL check, with [`Error`] on failure.
 pub type Result<T> = std::result::Result<T, Error>;
