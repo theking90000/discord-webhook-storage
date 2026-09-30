@@ -5,6 +5,7 @@ mod credentials;
 mod error;
 mod file;
 mod http;
+mod read;
 mod write;
 
 pub use credentials::WebhookCredentials;
@@ -13,4 +14,5 @@ pub use error::{
     WriteError,
 };
 pub use file::{DiscordFile, DiscordFileUrl};
+pub use read::ReadFile;
 pub use write::{WriteConfig, WriteFile};

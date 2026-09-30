@@ -1,6 +1,6 @@
 use std::{fmt, io, num::ParseIntError, str::Utf8Error};
 
-/// A failure while parsing URLs, sending an upload, or reading its response.
+/// A failure while parsing URLs, uploading, or downloading a file.
 ///
 /// Transport and JSON errors retain their original causes through
 /// [`std::error::Error::source`]. HTTP syntax, unsuccessful statuses, invalid
@@ -18,7 +18,7 @@ pub enum Error {
     JsonError(serde_json::Error),
     /// The HTTP response cannot be parsed or decoded within its limits.
     HttpParseError(HttpError),
-    /// Discord returned a status other than 200.
+    /// Discord returned a status that the operation cannot accept.
     HttpStatus {
         /// HTTP status code returned by Discord.
         status: u16,
@@ -32,6 +32,13 @@ pub enum Error {
     InvalidResponse(ResponseError),
     /// A write was rejected before accepting any bytes from that call.
     WriteError(WriteError),
+    /// The requested byte range does not have `start < end`.
+    InvalidRange {
+        /// First requested byte offset.
+        start: usize,
+        /// Inclusive last requested byte offset.
+        end: usize,
+    },
 }
 
 /// The reason a webhook URL was rejected, without retaining its secret token.
@@ -52,6 +59,8 @@ pub enum WebhookUrlError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DiscordFileUrlError {
+    /// The signed attachment URL has expired or the system clock is invalid.
+    Expired,
     /// The URL does not start with `https://cdn.discordapp.com/attachments/`.
     InvalidPrefix,
     /// A required path segment or query parameter is absent.
@@ -139,6 +148,8 @@ pub enum HttpError {
     },
     /// Neither Content-Length nor chunked transfer encoding was specified.
     MissingBodyFraming,
+    /// A streaming download does not declare Content-Length.
+    MissingContentLength,
     /// The chunk size has invalid syntax or cannot fit in `usize`.
     InvalidChunkSize {
         /// Rejected chunk size line, including any extensions.
@@ -230,10 +241,13 @@ impl fmt::Display for Error {
             Self::JsonError(error) => write!(f, "JSON encoding or decoding failed: {error}"),
             Self::HttpParseError(error) => write!(f, "invalid HTTP response: {error}"),
             Self::HttpStatus { status, .. } => {
-                write!(f, "Discord rejected the upload with HTTP status {status}")
+                write!(f, "Discord returned unexpected HTTP status {status}")
             }
             Self::InvalidResponse(error) => write!(f, "invalid upload response: {error}"),
             Self::WriteError(error) => write!(f, "write rejected: {error}"),
+            Self::InvalidRange { start, end } => {
+                write!(f, "invalid byte range {start}-{end}: expected start < end")
+            }
         }
     }
 }
@@ -252,6 +266,9 @@ impl fmt::Display for WebhookUrlError {
 impl fmt::Display for DiscordFileUrlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Expired => {
+                f.write_str("attachment URL has expired or the system clock is invalid")
+            }
             Self::InvalidPrefix => {
                 f.write_str("expected https://cdn.discordapp.com/attachments/ prefix")
             }
@@ -277,6 +294,7 @@ impl fmt::Display for HttpPart {
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingContentLength => f.write_str("download response requires Content-Length"),
             Self::UnexpectedEof { part } => write!(f, "unexpected EOF while reading {part}"),
             Self::InvalidUtf8 { part, source } => write!(f, "invalid UTF-8 in {part}: {source}"),
             Self::UnsupportedHttpVersion => f.write_str("expected HTTP/1.1 response version"),
@@ -430,7 +448,7 @@ impl std::error::Error for Error {
             Self::HttpParseError(error) => Some(error),
             Self::InvalidResponse(error) => Some(error),
             Self::WriteError(error) => Some(error),
-            Self::HttpStatus { .. } => None,
+            Self::HttpStatus { .. } | Self::InvalidRange { .. } => None,
         }
     }
 }
@@ -455,5 +473,5 @@ impl std::error::Error for DiscordFileUrlError {}
 impl std::error::Error for ResponseError {}
 impl std::error::Error for WriteError {}
 
-/// A result returned by URL parsing and upload operations.
+/// A result returned by URL parsing, upload, and download operations.
 pub type Result<T> = std::result::Result<T, Error>;

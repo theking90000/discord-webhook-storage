@@ -49,6 +49,12 @@ impl TryFrom<&str> for DiscordFile {
     }
 }
 
+impl AsRef<DiscordFileUrl> for DiscordFile {
+    fn as_ref(&self) -> &DiscordFileUrl {
+        &self.url
+    }
+}
+
 /// Owned fields parsed from a signed Discord CDN attachment URL.
 ///
 /// Formatting reconstructs the URL with query parameters ordered as `ex`, `is`,
@@ -170,6 +176,12 @@ impl TryFrom<&str> for DiscordFileUrl {
 
     fn try_from(value: &str) -> Result<Self> {
         Self::parse(value)
+    }
+}
+
+impl AsRef<DiscordFileUrl> for DiscordFileUrl {
+    fn as_ref(&self) -> &DiscordFileUrl {
+        self
     }
 }
 
