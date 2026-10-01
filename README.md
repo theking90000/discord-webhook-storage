@@ -237,6 +237,9 @@ One run with ten 20 MB files on a 1,000/500 Mbps connection:
 Includes TCP/TLS setup; excludes pauses between uploads. Results vary by host
 and network. [Full report](docs/benchmark1.md) · [Run the benchmark](docs/benchmark.md).
 
+The Discord benchmark was checked for memory leaks with Valgrind over five
+rounds of ten files. No definitely or indirectly lost memory was detected.
+
 ```sh
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
     cargo bench --locked --bench discord_benchmark --features tokio-tcp-pool
