@@ -179,10 +179,10 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn nearest_rank_percentiles_and_population_sigma() {
+        use super::Summary;
+
         let summary = Summary::new(&mut [10., 1., 9., 2., 8., 3., 7., 4., 6., 5.]);
         assert_eq!(summary.mean, 5.5);
         assert!((summary.sigma - 8.25_f64.sqrt()).abs() < 1e-12);
@@ -192,6 +192,8 @@ mod tests {
 
     #[test]
     fn parses_proc_stat_with_spaces_and_parentheses_in_comm() {
+        use super::{cpu_seconds, status_kib};
+
         let stat = "123 (name ) with spaces) R 0 0 0 0 0 0 0 0 0 0 150 25 0 0";
         assert_eq!(cpu_seconds(stat, 100.), Some((1.5, 0.25)));
         assert_eq!(

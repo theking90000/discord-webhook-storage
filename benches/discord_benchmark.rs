@@ -302,9 +302,9 @@ async fn run_round(
     tls: &Arc<rustls::ClientConfig>,
     probe: &Probe,
     report: &mut Report,
-    payload: &mut [u8],
-    buffer: &mut [u8],
+    buffers: (&mut [u8], &mut [u8]),
 ) -> BenchResult<()> {
+    let (payload, buffer) = buffers;
     let timeout = Duration::from_secs(settings.timeout_secs);
     let uploads = pool("discord.com:443", tls)?;
     let downloads = pool("cdn.discordapp.com:443", tls)?;
@@ -429,8 +429,7 @@ async fn main() -> BenchResult<()> {
             &tls,
             &probe,
             &mut report,
-            &mut payload,
-            &mut buffer,
+            (&mut payload, &mut buffer),
         )
         .await
         {
@@ -462,10 +461,10 @@ async fn main() -> BenchResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn streaming_verification_detects_corruption_and_wrong_lengths() {
+        use super::read_verified;
+
         futures::executor::block_on(async {
             let mut buffer = [0; 2];
             read_verified(
