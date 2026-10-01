@@ -224,6 +224,18 @@ DISCORD_BOT_TOKEN='<bot-token>' \
     cargo run --example webhook_parallel_upload_renew_download --features tokio-tcp-pool
 ```
 
+## Benchmark Discord
+
+The [live benchmark](docs/benchmark.md) uploads ten 20 MB files sequentially,
+then downloads each file twice. It reports upload and download timings,
+throughput distributions, and Linux process CPU and memory measurements.
+The guide also includes an allocation leak check with Valgrind.
+
+```sh
+DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
+    cargo bench --locked --bench discord_benchmark --features tokio-tcp-pool
+```
+
 ## API docs
 
 ```sh

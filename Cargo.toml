@@ -55,6 +55,11 @@ required-features = ["tokio-tcp-pool"]
 name = "webhook_parallel_upload_renew_download"
 required-features = ["tokio-tcp-pool"]
 
+[[bench]]
+name = "discord_benchmark"
+harness = false
+required-features = ["tokio-tcp-pool"]
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
