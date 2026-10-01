@@ -1,0 +1,3 @@
+{"round":0,"stage":"buffers_allocated","resources":{"user_s":0.0,"system_s":0.0,"rss_kib":23248,"peak_rss_kib":23248}}
+{"round":1,"stage":"round_dropped_buffers_retained","resources":{"user_s":0.29,"system_s":0.29,"rss_kib":24836,"peak_rss_kib":24836}}
+{"round":1,"stage":"buffers_dropped","resources":{"user_s":0.29,"system_s":0.29,"rss_kib":5044,"peak_rss_kib":24304}}
