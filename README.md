@@ -226,10 +226,16 @@ DISCORD_BOT_TOKEN='<bot-token>' \
 
 ## Benchmark Discord
 
-The [live benchmark](docs/benchmark.md) uploads ten 20 MB files sequentially,
-then downloads each file twice. It reports upload and download timings,
-throughput distributions, and Linux process CPU and memory measurements.
-The guide also includes an allocation leak check with Valgrind.
+One run with ten 20 MB files on a 1,000/500 Mbps connection:
+
+| Operation | Observed throughput | Mean time per file |
+| --- | --- | --- |
+| Upload, including Discord confirmation | 5.1 MB/s | 3.95 s |
+| First download | 26.9 MB/s | 0.74 s |
+| Repeated download | 75.3 MB/s | 0.27 s |
+
+Includes TCP/TLS setup; excludes pauses between uploads. Results vary by host
+and network. [Full report](docs/benchmark1.md) · [Run the benchmark](docs/benchmark.md).
 
 ```sh
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>' \
